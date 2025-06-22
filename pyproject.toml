@@ -1,9 +1,15 @@
 [project]
 name = "torchdire"
-version = "0.1.0"
+version = "0.1.3"
 description = "A PyTorch-based library with YAML automation"
 readme = "README.md"
 requires-python = ">=3.8"
+keywords = ["pytorch", "deep learning", "automation", "yaml"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent"
+]
 dependencies = [
     "torch>=2.0.0,<2.3.0",
     "tqdm",
@@ -17,35 +23,7 @@ dependencies = [
     "onnxruntime-tools",
     "timm"
 ]
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "Framework :: PyTorch",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent"
-]
-keywords = ["pytorch", "deep learning", "automation", "yaml"]
-
-authors = [
-<<<<<<< HEAD
-    { name = "Boopathi Raj", email = "your.email@example.com" }
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest",
-    "pytest-cov",
-    "flake8",
-    "mypy",
-    "black"
-=======
-    { name = "Boopathi Raj" }
->>>>>>> 775f983187a7e595786e23004fa9eced03c8bf5d
-]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
-<<<<<<< HEAD
 build-backend = "setuptools.build_meta"
-=======
-build-backend = "setuptools.build_meta"
->>>>>>> 775f983187a7e595786e23004fa9eced03c8bf5d
