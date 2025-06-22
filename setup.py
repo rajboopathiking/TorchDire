@@ -5,10 +5,10 @@ setup(
     version="0.1.8",
     packages=find_packages(),
     install_requires=[
-        "torch>=2.0.0,<2.3.0",
-        "PyYAML>=6.0",
+        "torch",
+        "PyYAML",
         "tqdm",
-        "numpy<2",           # <-- Pin numpy version here
+        "numpy",        
         "matplotlib",
         "seaborn",
         "pandas",
