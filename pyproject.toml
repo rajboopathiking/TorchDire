@@ -5,7 +5,7 @@ description = "A PyTorch-based library with YAML automation"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
-    "torch>=2.0.0",
+    "torch>=2.0.0,<2.3.0",
     "tqdm",
     "numpy",
     "matplotlib",
@@ -26,7 +26,16 @@ classifiers = [
 keywords = ["pytorch", "deep learning", "automation", "yaml"]
 
 authors = [
-    { name = "Boopathi Raj" }
+    { name = "Boopathi Raj", email = "your.email@example.com" }
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "flake8",
+    "mypy",
+    "black"
 ]
 
 [build-system]
