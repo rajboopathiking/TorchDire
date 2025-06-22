@@ -22,6 +22,12 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Framework :: PyTorch",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent"
+]
+keywords = ["pytorch", "deep learning", "automation", "yaml"]
+
+authors = [
+    { name = "Boopathi Raj" }
 ]
 
 [build-system]
