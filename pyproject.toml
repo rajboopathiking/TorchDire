@@ -1,13 +1,13 @@
 [project]
 name = "torchdire"
-version = "0.1.6"
+version = "0.1.8"
 description = "A PyTorch-based library with YAML automation"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
     "torch>=2.0.0,<2.3.0",
     "tqdm",
-    "numpy<2",  # <-- Pinned to avoid crash with extensions compiled with NumPy 1.x
+    "numpy<2",              # <-- Pin numpy version here
     "matplotlib",
     "seaborn",
     "pandas",
