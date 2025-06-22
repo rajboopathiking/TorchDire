@@ -23,6 +23,7 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Artificial Intelligence"
 ]
+
 keywords = ["pytorch", "deep learning", "automation", "yaml"]
 
 authors = [
