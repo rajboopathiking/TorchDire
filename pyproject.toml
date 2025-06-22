@@ -26,6 +26,7 @@ classifiers = [
 keywords = ["pytorch", "deep learning", "automation", "yaml"]
 
 authors = [
+<<<<<<< HEAD
     { name = "Boopathi Raj", email = "your.email@example.com" }
 ]
 
@@ -36,8 +37,15 @@ dev = [
     "flake8",
     "mypy",
     "black"
+=======
+    { name = "Boopathi Raj" }
+>>>>>>> 775f983187a7e595786e23004fa9eced03c8bf5d
 ]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
+<<<<<<< HEAD
 build-backend = "setuptools.build_meta"
+=======
+build-backend = "setuptools.build_meta"
+>>>>>>> 775f983187a7e595786e23004fa9eced03c8bf5d
