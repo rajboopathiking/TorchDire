@@ -26,7 +26,7 @@ classifiers = [
 keywords = ["pytorch", "deep learning", "automation", "yaml"]
 
 authors = [
-    { name = "Boopathi Raj", email = "your.email@example.com" }
+    { name = "Boopathi Raj", email = "rajboopathiking@gmail.com" }
 ]
 
 [project.optional-dependencies]
