@@ -2,8 +2,9 @@ name: Publish Python Package to PyPI
 
 on:
   push:
-    tags:
-      - 'v*.*.*'  # Trigger only on version tags like v0.1.0
+    branches:
+      - master
+
 
 jobs:
   build-and-publish:
