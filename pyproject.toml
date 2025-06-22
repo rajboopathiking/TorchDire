@@ -1,17 +1,17 @@
 [project]
 name = "torchdire"
-version = "0.1.13"
+version = "0.1.18"  # Incremented from v0.1.15
 description = "A PyTorch-based library with YAML automation"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
-    "torch"
+    "torch>=2.0.0,<2.3.0",
     "tqdm",
-    "numpy",  # Pin to NumPy 1.x to avoid compatibility issues
+    "numpy<2",  # Pin to NumPy 1.x
     "matplotlib",
     "seaborn",
     "pandas",
-    "torchvision",  # Ensure compatible with torch
+    "torchvision>=0.15.0",  # Compatible with torch
     "onnx",
     "onnxruntime",
     "onnxruntime-tools",
@@ -23,9 +23,7 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Artificial Intelligence"
 ]
-
 keywords = ["pytorch", "deep learning", "automation", "yaml"]
-
 authors = [
     { name = "Boopathi Raj", email = "rajboopathiking@gmail.com" }
 ]
