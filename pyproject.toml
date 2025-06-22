@@ -1,17 +1,17 @@
 [project]
 name = "torchdire"
-version = "0.1.18"  # Incremented from v0.1.15
+version = "0.1.18"
 description = "A PyTorch-based library with YAML automation"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
     "torch>=2.0.0,<2.3.0",
     "tqdm",
-    "numpy<2",  # Pin to NumPy 1.x
+    "numpy<2",
     "matplotlib",
     "seaborn",
     "pandas",
-    "torchvision>=0.15.0",  # Compatible with torch
+    "torchvision>=0.15.0",
     "onnx",
     "onnxruntime",
     "onnxruntime-tools",

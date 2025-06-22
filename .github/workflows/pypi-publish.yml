@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*.*.*'  # Only trigger on version tags like v0.1.1
+<<<<<<< HEAD
+=======
+    branches:
+      - master
+>>>>>>> 7a5914ad697467ebf0084f13ceba041605b090ff
 
 jobs:
   build-and-publish:
@@ -30,4 +35,8 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+<<<<<<< HEAD
         run: twine upload dist/*
+=======
+        run: twine upload dist/*
+>>>>>>> 7a5914ad697467ebf0084f13ceba041605b090ff
