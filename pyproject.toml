@@ -15,8 +15,7 @@ dependencies = [
     "onnx",
     "onnxruntime",
     "onnxruntime-tools",
-    "timm",
-    "gc"
+    "timm"
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
