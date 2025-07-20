@@ -1,11 +1,12 @@
 [project]
-name = "torchdire"
-version = "0.1.18"
+name = "TorchDire"
+version = "0.1.19"
 description = "A PyTorch-based library with YAML automation"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
     "torch>=2.0.0,<2.3.0",
+    "PyYAML>=6.0",
     "tqdm",
     "numpy<2",
     "matplotlib",
