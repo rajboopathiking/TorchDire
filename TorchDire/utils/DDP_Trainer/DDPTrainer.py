@@ -8,8 +8,14 @@ from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 # Trainer class
 
+# find_unused_parameters=False,  # <-- default
+#     check_reduction=False,
+#     gradient_as_bucket_view=False,
+#     static_graph=False
+
 class Trainer:
-    def __init__(self, model_fn, dataset_fn, df, train_fn, collate_fn=None, batch_size=4, num_epochs=10):
+    def __init__(self, model_fn, dataset_fn, df, train_fn,
+                  collate_fn=None, batch_size=4, num_epochs=10):
         self.model_fn = model_fn
         self.dataset_fn = dataset_fn
         self.train_fn = train_fn
