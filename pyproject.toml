@@ -1,6 +1,6 @@
 [project]
 name = "TorchDire"
-version = "0.2.3"
+version = "0.2.5"
 description = "A PyTorch-based library with YAML automation"
 readme = "README.md"
 requires-python = ">=3.8"
