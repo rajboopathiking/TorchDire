@@ -1,0 +1,4 @@
+monai
+nibabel
+SimpleITK
+scipy

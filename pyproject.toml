@@ -1,0 +1,19 @@
+[project]
+name = "torchdire"
+version = "0.1.0"
+description = "Library for Simplified AI model Building and AI/ML focused feature-rich framework"
+authors = [{ name = "Boopathiraj", email = "boopathiraj.researchbrains@gmail.com" }]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+
+dependencies = [
+    "torch",
+    "gc",
+    "torchvision",
+    "timm"             # or the version you target
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
