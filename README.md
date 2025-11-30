@@ -118,9 +118,3 @@ Check	Description
 
 📜 License
 MIT License — free for commercial and research use.
-
-speedups (e.g., batched P approximations)
-
-QGFD variants
-
-integration with FlashAttention
