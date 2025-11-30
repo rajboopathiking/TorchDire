@@ -67,8 +67,8 @@ python QGFD_Sanity_Checks.py
 Clone:
 
 ```bash
-git clone https://github.com/YOURNAME/YOURREPO.git
-cd YOURREPO
+git clone https://github.com/rajboopathiking/TorchDire.git
+cd TorchDire
 ```
 Install dependencies:
 
