@@ -4,7 +4,7 @@ import traceback
 import torch
 import torch.nn as nn
 
-
+from .qgfd_attention import MultiHeadQGFDLayer
 # -------------------------------------------------------------
 # SafeWrappedAttention
 # -------------------------------------------------------------
