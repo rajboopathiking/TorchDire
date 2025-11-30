@@ -185,6 +185,48 @@ class QGFDDiffusionBackbone(nn.Module):
 ```
 This is your εθ(xₜ, t, cond) used by all modality wrappers.
 
+## 🧩 Shared Backbone: One QGFD Diffusion Transformer for Text + Image
+
+By default, the library exposes *per-modality* diffusion models:
+
+- `TextQGFDDiffusionModel` (T5-based)
+- `ImageQGFDDiffusionModel` (ViT-based)
+- ...
+
+Each one owns its own `QGFDDiffusionBackbone`.
+
+For research, we often want a **single shared Transformer** that acts as εθ across modalities — e.g.,
+
+- first train on **text** (MRPC),
+- then continue training on **images** (CIFAR-10),
+- and see whether QGFD improves cross-modal generalization.
+
+### Design: shared QGFD backbone + modality adapters
+
+We introduce a simple pattern:
+
+- **One shared denoiser**: `QGFDDiffusionBackbone`
+- **Per-modality adapters**:
+  - `TextAdapter` – T5 encoder → latent tokens & conditioning
+  - `ImageAdapter` – ViT encoder → latent tokens & (optional) conditioning
+  - (Audio/Tabular/Video can be added the same way)
+
+Each adapter does:
+
+1. Encode raw data → **x₀_latent** (shape `[B, L_m, D_m]`).
+2. Project latents to the **shared latent_dim** via a linear layer.
+3. Provide **conditioning tokens** in the same `d_model` as the backbone (or `None`).
+
+The shared backbone sees everything as:
+
+```python
+eps_pred = backbone(
+    x_t,           # [B, L_shared, latent_dim]
+    t,             # [B]
+    cond_tokens,   # [B, L_cond, d_model] or None
+    cond_mask,     # [B, L_cond] or None
+)
+```
 ```python 
 import torch
 import torch.nn as nn
