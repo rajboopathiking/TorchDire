@@ -216,17 +216,6 @@ Each adapter does:
 1. Encode raw data → **x₀_latent** (shape `[B, L_m, D_m]`).
 2. Project latents to the **shared latent_dim** via a linear layer.
 3. Provide **conditioning tokens** in the same `d_model` as the backbone (or `None`).
-
-The shared backbone sees everything as:
-
-```python
-eps_pred = backbone(
-    x_t,           # [B, L_shared, latent_dim]
-    t,             # [B]
-    cond_tokens,   # [B, L_cond, d_model] or None
-    cond_mask,     # [B, L_cond] or None
-)
-```
 ```python 
 import torch
 import torch.nn as nn
