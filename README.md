@@ -44,17 +44,19 @@ This is intended as a Python library you host on GitHub.
 Basic local dev install:
 
 ```bash
-git clone https://github.com/yourname/QGFD-Diffusion-Transformer.git
-cd QGFD-Diffusion-Transformer
-pip install -e .
+git clone https://github.com/yourname/TorchDire.git
+cd TorchDire
+pip install -e
+
+```
 Required packages (minimal):
 
-bash
+```bash
 Copy code
 pip install torch torchvision
 pip install transformers datasets
 You can also add these to your pyproject.toml / setup.cfg later.
-
+```
 📁 Library Structure
 Key file:
 
@@ -62,37 +64,37 @@ QGFD_Diffusion_Transformer.py
 
 Main components inside:
 
-Core
+Core :
 
-QGFDMultiheadAttention
-
-PositionwiseFFN
-
-TimestepEmbedding
-
-EncoderBlock, DecoderBlock
-
-QGFDDiffusionBackbone
-
-DiffusionConfig
-
-DDPMBetaSchedule, q_sample
-
-Modalities
-
-TextQGFDDiffusionModel
-
-ImageQGFDDiffusionModel
-
-AudioQGFDDiffusionModel
-
-TabularQGFDDiffusionModel
-
-VideoQGFDDiffusionModel
-
-Factory
-
-create_qgfd_diffusion_model(...)
+    QGFDMultiheadAttention
+    
+    PositionwiseFFN
+    
+    TimestepEmbedding
+    
+    EncoderBlock, DecoderBlock
+    
+    QGFDDiffusionBackbone
+    
+    DiffusionConfig
+    
+    DDPMBetaSchedule, q_sample
+    
+    Modalities
+    
+    TextQGFDDiffusionModel
+    
+    ImageQGFDDiffusionModel
+    
+    AudioQGFDDiffusionModel
+    
+    TabularQGFDDiffusionModel
+    
+    VideoQGFDDiffusionModel
+    
+    Factory
+    
+    create_qgfd_diffusion_model(...)
 
 🚀 Quickstart
 1. Import and create a model
@@ -118,6 +120,7 @@ diff_cfg = DiffusionConfig(
 )
 
 # TEXT diffusion model (T5-based)
+
 text_model, tokenizer, schedule = create_qgfd_diffusion_model(
     modality="text",
     backbone_name="t5-small",
@@ -125,9 +128,8 @@ text_model, tokenizer, schedule = create_qgfd_diffusion_model(
 )
 text_model.to(device)
 schedule = schedule.to(device)
-2. Dummy text diffusion step
-python
-Copy code
+# 2. Dummy text diffusion step
+```python
 texts = ["hello world", "query graph flow diffusion"]
 batch = tokenizer(texts, return_tensors="pt", padding=True).to(device)
 
@@ -149,12 +151,12 @@ loss = text_model.diffusion_forward(
 )
 
 print("Text diffusion loss:", loss.item())
+```
 You should see a positive finite loss (≈ 1–2 for untrained denoiser).
 
-🧠 Architecture Overview
-QGFD Attention
-python
-Copy code
+# 🧠 Architecture Overview
+# QGFD Attention
+```python
 class QGFDMultiheadAttention(nn.Module):
     # ...
     def forward(self, x_q, x_kv, attn_mask=None, qgfd=True):
@@ -164,6 +166,7 @@ class QGFDMultiheadAttention(nn.Module):
         #   apply diffusion attn_diff = attn @ P^k
         #   mix: attn = α * attn_diff + (1 - α) * attn
         # return projected output
+```
 Self-attention (L_q == L_k):
 
 QGFD applied.
@@ -172,9 +175,8 @@ Cross-attention (L_q != L_k):
 
 qgfd=False, no diffusion (safe for ViT, text-image, etc.).
 
-Diffusion Backbone
-python
-Copy code
+# Diffusion Backbone
+```python
 class QGFDDiffusionBackbone(nn.Module):
     def forward(self, x_t, t, cond_tokens=None, cond_mask=None):
         # project latents -> model dim
@@ -182,4 +184,5 @@ class QGFDDiffusionBackbone(nn.Module):
         # run stack of QGFD DecoderBlocks with cond_tokens as "encoder"
         # project back to latent_dim → epsilon prediction
         return eps_pred
+```
 This is your εθ(xₜ, t, cond) used by all modality wrappers.
