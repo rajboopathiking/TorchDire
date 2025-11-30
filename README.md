@@ -100,21 +100,3 @@ model = wrap_model_with_qgfd(
 outputs = model(input_ids)
 
 ```
-The model behaves identically interface-wise, but internally runs QGFD attention.
-
-🧪 Running Sanity Tests
-```bash
-python QGFD_Sanity_Checks.py
-```
-This runs 4 checks:
-
-Check	Description
-1	QGFD layer forward shape / step counter
-2	Attention mask correctness
-3	Wrapping a tiny synthetic model
-4	Optional HF model smoke test
-
-✔ Pass = everything structurally healthy.
-
-📜 License
-MIT License — free for commercial and research use.
