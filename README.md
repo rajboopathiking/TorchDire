@@ -98,8 +98,7 @@ Factory
 
 🚀 Quickstart
 1. Import and create a model
-python
-Copy code
+```python
 import torch
 from QGFD_Diffusion_Transformer import (
     create_qgfd_diffusion_model,
@@ -118,7 +117,6 @@ diff_cfg = DiffusionConfig(
     num_timesteps=1000,
     qgfd_steps=1,
 )
-
 # TEXT diffusion model (T5-based)
 
 text_model, tokenizer, schedule = create_qgfd_diffusion_model(
@@ -128,6 +126,8 @@ text_model, tokenizer, schedule = create_qgfd_diffusion_model(
 )
 text_model.to(device)
 schedule = schedule.to(device)
+
+```
 # 2. Dummy text diffusion step
 ```python
 texts = ["hello world", "query graph flow diffusion"]
