@@ -119,11 +119,6 @@ Check	Description
 📜 License
 MIT License — free for commercial and research use.
 
-🤝 Contributing
-Pull requests welcome — especially for:
-
-supporting more transformer architectures
-
 speedups (e.g., batched P approximations)
 
 QGFD variants
