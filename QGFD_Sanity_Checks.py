@@ -1,5 +1,4 @@
 import torch
-from QGFD_Diffusion_Transformer import create_qgfd_diffusion_model, DiffusionConfig, DDPMBetaSchedule
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
