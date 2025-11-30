@@ -44,7 +44,7 @@ This is intended as a Python library you host on GitHub.
 Basic local dev install:
 
 ```bash
-git clone https://github.com/yourname/TorchDire.git](https://github.com/rajboopathiking/TorchDire.git
+git clone https://github.com/rajboopathiking/TorchDire.git
 cd TorchDire
 pip install -e
 
