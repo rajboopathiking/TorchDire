@@ -62,15 +62,6 @@ Run:
 ```bash
 python QGFD_Sanity_Checks.py
 ```
-This validates:
-
-QGFD layer shapes & step counter
-
-mask propagation
-
-model wrapping on a tiny synthetic model
-
-optional HF model wrapping smoke test
 
 📦 Installation
 Clone:
@@ -111,49 +102,6 @@ outputs = model(input_ids)
 ```
 The model behaves identically interface-wise, but internally runs QGFD attention.
 
-⚙ How It Works
-SafeWrappedAttention
-This meta-module:
-
-stores original module in . _orig
-
-instantiates a QGFD layer as .qgfd
-
-copies original public attributes
-
-intercepts the forward pass
-
-maintains:
-
-caches
-
-masks
-
-attention outputs
-
-wrap_model_with_qgfd
-It traverses all named submodules:
-
-Detects attention blocks with is_leaf_attention
-
-Instantiates a wrapper
-
-Installs it using _set_submodule
-
-Verifies correct replacement
-
-Prints a summary
-
-Supports:
-
-ModuleList
-
-nested attributes
-
-tuple/list submodules
-
-attention classes in encoder/decoder blocks
-
 🧪 Running Sanity Tests
 ```bash
 python QGFD_Sanity_Checks.py
@@ -168,13 +116,6 @@ Check	Description
 
 ✔ Pass = everything structurally healthy.
 
-📁 Repository Structure
-pgsql
-Copy code
-├── qgfd_attention.py             # QGFD attention implementation
-├── universal_qgfd_replacer.py    # Universal attention wrapper
-├── QGFD_Sanity_Checks.py         # Tests
-└── README.md                     # This file
 📜 License
 MIT License — free for commercial and research use.
 
