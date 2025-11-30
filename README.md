@@ -80,7 +80,7 @@ Core :
     
     DDPMBetaSchedule, q_sample
     
-    Modalities
+Modalities :
     
     TextQGFDDiffusionModel
     
@@ -92,7 +92,7 @@ Core :
     
     VideoQGFDDiffusionModel
     
-    Factory
+Factory
     
     create_qgfd_diffusion_model(...)
 
