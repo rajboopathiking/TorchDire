@@ -46,7 +46,7 @@ Basic local dev install:
 ```bash
 git clone https://github.com/rajboopathiking/TorchDire.git
 cd TorchDire
-pip install -e
+pip install -e .
 
 ```
 Required packages (minimal):
