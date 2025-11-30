@@ -363,6 +363,12 @@ class TextQGFDDiffusionModel(nn.Module):
         self.diffusion_cfg = diffusion_cfg
         self.denoiser = QGFDDiffusionBackbone(diffusion_cfg)
 
+        # Use T5's vocabulary size for decoding embeddings -> token logits
+        self.vocab_size = self.t5.config.vocab_size
+        # We can reuse T5's lm_head directly (it maps [B,L,D] -> [B,L,vocab])
+        # No extra layer needed.
+        self.lm_head = self.t5.lm_head
+
     @property
     def tokenizer(self):
         return T5Tokenizer.from_pretrained(self.t5.name_or_path)
@@ -395,6 +401,83 @@ class TextQGFDDiffusionModel(nn.Module):
         )
         loss = F.mse_loss(eps_pred, eps)
         return loss
+
+    # -------- NEW: decode embeddings to logits --------
+    def decode_embeddings(self, x0_embeds: torch.Tensor) -> torch.Tensor:
+        """
+        Map denoised embeddings [B,L,D] to token logits [B,L,vocab].
+        Uses T5's lm_head.
+        """
+        return self.lm_head(x0_embeds)
+
+    # -------- NEW: diffusion sampling (DDIM-style) --------
+    def diffusion_sample(
+        self,
+        cond_input_ids: torch.Tensor,
+        cond_attention_mask: torch.Tensor,
+        schedule: DDPMBetaSchedule,
+        num_timesteps: int,
+    ) -> torch.Tensor:
+        """
+        Run reverse diffusion to sample x0_embeds given conditioning text.
+
+        Args:
+            cond_input_ids: [B, Lc]
+            cond_attention_mask: [B, Lc]
+            schedule: DDPMBetaSchedule
+            num_timesteps: number of diffusion steps (T)
+
+        Returns:
+            x0_embeds: [B, L_gen, D]
+                Here we choose L_gen = Lc (same length as conditioning),
+                but you can change this if you want a fixed generation length.
+        """
+        device = cond_input_ids.device
+        B, Lc = cond_input_ids.shape
+        D = self.diffusion_cfg.latent_dim
+
+        # encode conditioning tokens once
+        cond_tokens = self.encode_text(cond_input_ids, cond_attention_mask)  # [B,Lc,D]
+
+        # we choose generation length equal to conditioning length
+        L_gen = Lc
+
+        # start from standard normal noise in latent space
+        x_t = torch.randn(B, L_gen, D, device=device)
+
+        # DDIM-style deterministic sampling: no extra noise
+        for step in reversed(range(num_timesteps)):
+            t = torch.full((B,), step, device=device, dtype=torch.long)
+
+            # predict eps at time t
+            eps_pred = self.denoiser(
+                x_t,
+                t,
+                cond_tokens=cond_tokens,
+                cond_mask=cond_attention_mask,
+            )  # [B,L_gen,D]
+
+            alpha_bar_t = schedule.alphas_cumprod[step].to(device)
+            if step > 0:
+                alpha_bar_prev = schedule.alphas_cumprod[step - 1].to(device)
+            else:
+                alpha_bar_prev = torch.tensor(1.0, device=device)
+
+            # reshape to broadcast: [1,1,1]
+            alpha_bar_t = alpha_bar_t.view(1, 1, 1)
+            alpha_bar_prev = alpha_bar_prev.view(1, 1, 1)
+
+            # x0 prediction from x_t and eps_pred
+            # x0 = (x_t - sqrt(1 - alpha_bar_t) * eps) / sqrt(alpha_bar_t)
+            x0_pred = (x_t - torch.sqrt(1.0 - alpha_bar_t) * eps_pred) / torch.sqrt(alpha_bar_t)
+
+            # deterministic DDIM update:
+            # x_{t-1} = sqrt(alpha_bar_prev) * x0 + sqrt(1 - alpha_bar_prev) * eps_pred
+            x_t = torch.sqrt(alpha_bar_prev) * x0_pred + torch.sqrt(1.0 - alpha_bar_prev) * eps_pred
+
+        # after loop, x_t is our x0
+        x0_embeds = x_t
+        return x0_embeds
 
 
 # ================================================================
