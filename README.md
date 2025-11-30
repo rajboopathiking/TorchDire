@@ -51,10 +51,9 @@ cd TorchDire
 Required packages (minimal):
 
 ```bash
-Copy code
 pip install torch torchvision
 pip install transformers datasets
-You can also add these to your pyproject.toml / setup.cfg later.
+
 ```
 📁 Library Structure
 Key file:
