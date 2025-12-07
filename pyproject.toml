@@ -50,4 +50,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["Dire", "Distributed", "layers", "models"]
-py-modules = ["qgfd_attention", "universal_qgfd_replacer", "QGFD_Sanity_CheckS"]
+py-modules = ["qgfd_attention", "universal_qgfd_replacer", "QGFD_Sanity_Checks"]
