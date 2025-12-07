@@ -1,6 +1,6 @@
 [project]
 name = "torchdire"
-version = "0.0.1"
+version = "0.5.1"
 description = "Library for simplified AI model building with QGFD and YAML-based automation."
 readme = "README.md"
 license = { file = "LICENSE" }
