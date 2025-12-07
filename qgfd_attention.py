@@ -1,12 +1,7 @@
-# qgfd_attention.py
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-# Repro
-SEED = 42
-torch.manual_seed(SEED)
 
 
 class MultiHeadQGFDLayer(nn.Module):
@@ -38,6 +33,7 @@ class MultiHeadQGFDLayer(nn.Module):
         early_stop_eps=1e-5,
         detach_P=False,
         temp=1.0,
+        **kwargs
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -46,14 +42,14 @@ class MultiHeadQGFDLayer(nn.Module):
         assert self.proj_dim % num_heads == 0, "proj_dim must be divisible by num_heads"
         self.head_dim = self.proj_dim // num_heads
 
-        self.diffusion_steps = diffusion_steps
+        self.diffusion_steps = int(diffusion_steps)
         self.target_alpha = float(target_alpha)
         self.warmup_steps = int(warmup_steps)
         self.early_stop_eps = float(early_stop_eps)
         self.detach_P = bool(detach_P)
         self.temp = float(temp) if temp > 0.0 else 1.0
 
-        # used for alpha warmup
+        # used for alpha warmup (and eval-time control)
         self.register_buffer("step_count", torch.zeros(1, dtype=torch.long))
 
         # projections
@@ -62,13 +58,18 @@ class MultiHeadQGFDLayer(nn.Module):
         self.v_proj = nn.Linear(embed_dim, self.proj_dim, bias=use_bias)
         self.out_proj = nn.Linear(self.proj_dim, embed_dim, bias=use_bias)
 
-    def get_alpha(self):
-        """Linear warmup from 0 to target_alpha over warmup_steps."""
+    # ------------ alpha schedule ------------
+    def get_alpha(self) -> float:
+        """
+        Linear warmup from 0 to target_alpha over warmup_steps.
+        For evaluation you can set warmup_steps=0 to use target_alpha directly.
+        """
         if self.warmup_steps <= 0:
             return float(self.target_alpha)
         factor = min(1.0, float(self.step_count.item()) / float(self.warmup_steps))
         return float(self.target_alpha * factor)
 
+    # ------------ key-based transition matrix ------------
     def build_transition_from_keys(self, K):
         """
         Build key-based transition matrix P from keys.
@@ -87,7 +88,7 @@ class MultiHeadQGFDLayer(nn.Module):
 
         # scale and temperature
         sim = sim / max(1.0, math.sqrt(self.head_dim))
-        sim = sim / (self.temp if self.temp > 0 else 1.0)
+        sim = sim / self.temp
 
         # softmax to get transitions
         P = F.softmax(sim, dim=-1)
@@ -100,11 +101,19 @@ class MultiHeadQGFDLayer(nn.Module):
 
         return P
 
+    # ------------ mask handling ------------
     def apply_attention_mask(self, scores, attention_mask):
+        """
+        attention_mask: can be
+            - (B, Lk)
+            - (B, 1, 1, Lk)
+            - bool mask
+            - additive mask already in logits space
+        """
         if attention_mask is None:
             return scores
 
-        # Expected attention_mask shape: (B, Lk) or (B, 1, 1, Lk) or bool mask
+        # bool mask: True = keep, False = mask
         if attention_mask.dtype == torch.bool:
             additive = (~attention_mask).to(scores.dtype) * -1e9
         else:
@@ -115,19 +124,33 @@ class MultiHeadQGFDLayer(nn.Module):
 
         return scores + additive
 
-    def forward(self, hidden_states, kv=None, attention_mask=None):
+    # ------------ forward ------------
+    def forward(
+        self,
+        hidden_states,
+        kv=None,
+        attention_mask=None,
+        head_mask=None,
+        output_attentions=False,
+        **kwargs
+    ):
         """
         Args:
             hidden_states: (B, Lq, D)
-            kv: key/value source (B, Lk, D) or None (self-attention)
-            attention_mask: broadcastable mask
+            kv: optional key/value input (B, Lk, D). If None, self-attn on hidden_states.
+            attention_mask: HF-style attention mask.
+            head_mask: optional per-head scaling.
+            output_attentions: whether to return attention probabilities.
 
         Returns:
-            attn_output: (B, Lq, D)
-            p:          (B, H, Lq, Lk) attention probabilities after diffusion
+            If output_attentions:
+                (attn_output, p)
+            else:
+                (attn_output,)
         """
         B, Lq, D = hidden_states.shape
-        kv = hidden_states if kv is None else kv
+        if kv is None:
+            kv = hidden_states
         Lk = kv.shape[1]
 
         # project and reshape to (B, H, L, head_dim)
@@ -150,7 +173,7 @@ class MultiHeadQGFDLayer(nn.Module):
         # scaled dot-product scores (before softmax)
         scores = torch.einsum("bhqd,bhkd->bhqk", Q, K) / math.sqrt(self.head_dim)
 
-        # apply mask before softmax
+        # apply attention mask
         scores = self.apply_attention_mask(scores, attention_mask)
 
         # baseline softmax attention distribution
@@ -162,7 +185,7 @@ class MultiHeadQGFDLayer(nn.Module):
             p = p0
         else:
             P = self.build_transition_from_keys(K)  # (B,H,Lk,Lk)
-            p = p0.clone()
+            p = p0
             prev_p = None
 
             for _ in range(self.diffusion_steps):
@@ -172,25 +195,34 @@ class MultiHeadQGFDLayer(nn.Module):
                 )
 
                 # early stop on small change
-                if prev_p is not None and torch.max(torch.abs(p_next - prev_p)) < self.early_stop_eps:
+                if (
+                    prev_p is not None
+                    and torch.max(torch.abs(p_next - prev_p)) < self.early_stop_eps
+                ):
                     p = p_next
                     break
 
-                prev_p = p.clone()
+                prev_p = p
                 p = p_next
 
+        # optional per-head scaling
+        if head_mask is not None:
+            p = p * head_mask.view(1, -1, 1, 1)
+
         # attention output
-        attn_output = torch.einsum("bhqk,bhkd->bhqd", p, V)  # (B,H,Lq,hd)
-        attn_output = (
-            attn_output.transpose(1, 2)
+        attn_output_raw = torch.einsum("bhqk,bhkd->bhqd", p, V)  # (B,H,Lq,hd)
+        attn_output_raw = (
+            attn_output_raw.transpose(1, 2)
             .contiguous()
             .view(B, Lq, self.proj_dim)
-        )  # (B,Lq,proj_dim)
-        attn_output = self.out_proj(attn_output)  # back to embed_dim
+        )
+        attn_output = self.out_proj(attn_output_raw)  # final projection back to embed_dim
 
         # increment step counter with overflow protection
         self.step_count += 1
         if self.step_count.item() > 10**12:
             self.step_count.zero_()
 
-        return attn_output, p
+        if output_attentions:
+            return (attn_output, p)
+        return (attn_output,)
