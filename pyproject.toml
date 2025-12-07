@@ -1,23 +1,13 @@
 [project]
 name = "torchdire"
 version = "0.2.8"
-description = "Library for simplified AI model building with YAML automation and feature-rich ML utilities."
+description = "Library for simplified AI model building with QGFD and YAML automation."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.9"
 
 authors = [
     { name = "Boopathi Raj", email = "rajboopathiking@gmail.com" }
-]
-
-keywords = ["pytorch", "deep learning", "automation", "yaml", "ml", "ai"]
-
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence"
 ]
 
 dependencies = [
@@ -36,18 +26,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest",
-    "pytest-cov",
-    "flake8",
-    "mypy",
-    "black"
-]
+dev = ["pytest", "pytest-cov", "flake8", "mypy", "black"]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["Dire", "Distributed", "layers", "models"]
-py-modules = ["qgfd_attention", "universal_qgfd_replacer", "QGFD_Sanity_Checks"]
+py-modules = [
+    "qgfd_attention",
+    "universal_qgfd_replacer"
+]
+
+[tool.setuptools.packages.find]
+include = ["Dire", "Distributed", "layers"]
