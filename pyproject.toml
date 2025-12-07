@@ -47,3 +47,7 @@ dev = [
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["Dire", "Distributed", "layers", "models"]
+py-modules = ["qgfd_attention", "universal_qgfd_replacer", "QGFD_Sanity_CheckS"]
