@@ -1,47 +1,38 @@
 [project]
-<<<<<<< HEAD
 name = "torchdire"
-version = "0.2.6"
-description = "Library for Simplified AI model Building and AI/ML focused feature-rich framework"
-authors = [{ name = "Boopathiraj", email = "boopathiraj.researchbrains@gmail.com" }]
+version = "0.2.7"
+description = "Library for simplified AI model building with YAML automation and feature-rich ML utilities."
 readme = "README.md"
-license = {text = "MIT"}
+license = { text = "MIT" }
 requires-python = ">=3.9"
 
-dependencies = [
-    "torch",
-    "gc",
-    "torchvision",
-    "timm"             # or the version you target
-=======
-name = "TorchDire"
-version = "0.2.6"
-description = "A PyTorch-based library with YAML automation"
-readme = "README.md"
-requires-python = ">=3.8"
+authors = [
+    { name = "Boopathi Raj", email = "rajboopathiking@gmail.com" }
+]
+
+keywords = ["pytorch", "deep learning", "automation", "yaml", "ml", "ai"]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+
 dependencies = [
     "torch>=2.0.0,<2.3.0",
+    "torchvision>=0.15.0",
+    "timm",
     "PyYAML>=6.0",
     "tqdm",
     "numpy<2",
     "matplotlib",
     "seaborn",
     "pandas",
-    "torchvision>=0.15.0",
     "onnx",
     "onnxruntime",
-    "onnxruntime-tools",
-    "timm"
-]
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence"
-]
-keywords = ["pytorch", "deep learning", "automation", "yaml"]
-authors = [
-    { name = "Boopathi Raj", email = "rajboopathiking@gmail.com" }
+    "onnxruntime-tools"
 ]
 
 [project.optional-dependencies]
@@ -51,13 +42,8 @@ dev = [
     "flake8",
     "mypy",
     "black"
->>>>>>> b5b6c631ecf67fd83b594b713e7967b5cec93b51
 ]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
-<<<<<<< HEAD
 build-backend = "setuptools.build_meta"
-=======
-build-backend = "setuptools.build_meta"
->>>>>>> b5b6c631ecf67fd83b594b713e7967b5cec93b51
