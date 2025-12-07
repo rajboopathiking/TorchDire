@@ -96,7 +96,4 @@ model = wrap_model_with_qgfd(
     temp=1.0,
     verbose=True
 )
-# Run inference as usual
-outputs = model(input_ids)
-
 ```
