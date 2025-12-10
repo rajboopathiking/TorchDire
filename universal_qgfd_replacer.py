@@ -15,6 +15,9 @@ class SafeWrappedAttention(nn.Module):
         (attn_output, present, attn_weights)
 
     Stealth mode: class name is spoofed to match the original attention class.
+
+    QGFD-specific behavior (mode, enable_qgfd, max_alpha, etc.) is controlled
+    via kwargs passed to MultiHeadQGFDLayer from wrap_model_with_qgfd.
     """
 
     def __init__(
@@ -26,7 +29,19 @@ class SafeWrappedAttention(nn.Module):
         warmup_steps: int = 0,
         kernel_size: int = 5,
         early_stop_eps: float = 0.0,
+        **qgfd_kwargs,
     ):
+        """
+        Args:
+            orig_mod: original attention module to be wrapped.
+            MultiHeadQGFDLayer: class implementing QGFD attention.
+            diffusion_steps, target_alpha, warmup_steps, kernel_size, early_stop_eps:
+                core hyperparameters for QGFD.
+            **qgfd_kwargs:
+                Any additional keyword arguments forwarded to MultiHeadQGFDLayer,
+                e.g. mode="full"/"conv", enable_qgfd, max_alpha, max_full_seq_len,
+                full_fallback_mode, mask_threshold, debug, detach_P, temp, etc.
+        """
         super().__init__()
         object.__setattr__(self, "_orig", orig_mod)
 
@@ -62,7 +77,7 @@ class SafeWrappedAttention(nn.Module):
 
         proj_dim = embed_dim
 
-        # Instantiate QGFD
+        # Instantiate QGFD (all extra behavior via **qgfd_kwargs)
         qgfd = MultiHeadQGFDLayer(
             embed_dim=embed_dim,
             num_heads=num_heads,
@@ -72,13 +87,14 @@ class SafeWrappedAttention(nn.Module):
             warmup_steps=warmup_steps,
             kernel_size=kernel_size,
             early_stop_eps=early_stop_eps,
+            **qgfd_kwargs,
         )
         object.__setattr__(self, "qgfd", qgfd)
         object.__setattr__(self, "num_heads", num_heads)
         object.__setattr__(self, "embed_dim", embed_dim)
         object.__setattr__(self, "head_dim", proj_dim // num_heads)
 
-        # Copy public attributes
+        # Copy public attributes from original module
         for attr in dir(orig_mod):
             if attr.startswith("_"):
                 continue
@@ -93,7 +109,7 @@ class SafeWrappedAttention(nn.Module):
             except Exception:
                 pass
 
-        # Try to copy weights
+        # Try to copy projection weights into QGFD
         with torch.no_grad():
             for src_name, dst_name in [
                 ("q", "q_proj"),
@@ -128,7 +144,7 @@ class SafeWrappedAttention(nn.Module):
                 except Exception:
                     pass
 
-        # Stealth
+        # Stealth: spoof class name to look like original attention
         self.__class__.__name__ = orig_mod.__class__.__name__
 
     def __repr__(self):
@@ -258,10 +274,33 @@ def wrap_model_with_qgfd(
     kernel_size: int = 5,
     early_stop_eps: float = 0.0,
     verbose: bool = True,
+    **qgfd_kwargs,
 ):
     """
     In-place replacement of attention modules with SafeWrappedAttention+QGFD.
     Returns the same model object (for convenience).
+
+    Args:
+        model: nn.Module with attention layers (e.g. GPT-2, OPT, etc.)
+        MultiHeadQGFDLayer: QGFD attention implementation class.
+        diffusion_steps, target_alpha, warmup_steps, kernel_size, early_stop_eps:
+            core QGFD hyperparameters passed to every wrapped attention.
+        verbose: if True, prints replacement diagnostics.
+        **qgfd_kwargs:
+            Extra keyword args forwarded to MultiHeadQGFDLayer via SafeWrappedAttention.
+            Examples (depending on your MultiHeadQGFDLayer signature):
+                - mode="full" or "conv"
+                - enable_qgfd=True/False
+                - max_alpha=0.05
+                - max_full_seq_len=512
+                - full_fallback_mode="conv" or "disable"
+                - mask_threshold=-1e4
+                - debug=True
+                - detach_P=True
+                - temp=1.0
+            Any unknown kwargs will be passed through; if MultiHeadQGFDLayer
+            does not accept them, Python will raise a TypeError at construction,
+            making misconfigurations easy to catch.
     """
     gc.collect()
     if torch.cuda.is_available():
@@ -311,6 +350,7 @@ def wrap_model_with_qgfd(
                 warmup_steps=warmup_steps,
                 kernel_size=kernel_size,
                 early_stop_eps=early_stop_eps,
+                **qgfd_kwargs,
             )
             instantiated.append((name, wrapper))
         except Exception as e:
