@@ -2,12 +2,8 @@ import gc
 import traceback
 import torch
 import torch.nn as nn
-from typing import Optional # Import Optional
 
 
-# -------------------------------------------------------------
-# SafeWrappedAttention
-# -------------------------------------------------------------
 class SafeWrappedAttention(nn.Module):
     """
     Wrap an attention module by:
@@ -18,88 +14,71 @@ class SafeWrappedAttention(nn.Module):
         (attn_output, present) or
         (attn_output, present, attn_weights)
 
-    STEALTH MODE:
-    This wrapper mimics the class name and repr of the original module
-    so that `print(model)` looks unchanged and tools (like LoRA/PEFT)
-    checking class names remain compatible.
+    Stealth mode: class name is spoofed to match the original attention class.
     """
 
     def __init__(
         self,
-        orig_mod,
+        orig_mod: nn.Module,
         MultiHeadQGFDLayer,
-        diffusion_steps=4,
-        target_alpha=0.02,
-        warmup_steps=20000,
-        detach_P=False,
-        temp=1.0,
+        diffusion_steps: int = 1,
+        target_alpha: float = 0.02,
+        warmup_steps: int = 0,
+        kernel_size: int = 5,
+        early_stop_eps: float = 0.0,
     ):
         super().__init__()
-        # store original module and create qgfd
         object.__setattr__(self, "_orig", orig_mod)
 
-        # -------- infer embed_dim --------
+        # Infer embed_dim
         embed_dim = (
             getattr(orig_mod, "d_model", None)
             or getattr(orig_mod, "embed_dim", None)
             or getattr(orig_mod, "hidden_size", None)
         )
-
         if embed_dim is None:
             for n, p in orig_mod.named_parameters():
                 ln = n.lower()
                 if p.ndim == 2 and any(tag in ln for tag in ["q_proj", "q", "in_proj"]):
                     embed_dim = p.shape[1]
                     break
-
         if embed_dim is None:
             raise RuntimeError(
                 f"Cannot infer embed_dim for SafeWrappedAttention on {orig_mod.__class__.__name__}"
             )
 
-        # -------- infer num_heads --------
-        num_heads = getattr(orig_mod, "n_heads", None) or getattr(
-            orig_mod, "num_heads", None
-        )
-
+        # Infer num_heads
+        num_heads = getattr(orig_mod, "n_heads", None) or getattr(orig_mod, "num_heads", None)
         if num_heads is None:
-            # Try to infer from q_proj weight shape
             q_proj = getattr(orig_mod, "q_proj", None) or getattr(orig_mod, "q", None)
             if q_proj is not None and hasattr(q_proj, "weight"):
                 q_out_dim = q_proj.weight.shape[0]
-                # Try common head counts
-                for h in [32, 16, 12, 8, 4, 2]:
+                for h in [32, 24, 16, 12, 8, 4, 2]:
                     if q_out_dim % h == 0:
                         num_heads = h
                         break
-
         if num_heads is None:
-            # last resort – this may be wrong for exotic models
-            num_heads = 8
+            num_heads = 8  # fallback
 
         proj_dim = embed_dim
 
-        # instantiate qgfd layer
-        object.__setattr__(
-            self,
-            "qgfd",
-            MultiHeadQGFDLayer(
-                embed_dim,
-                num_heads,
-                proj_dim,
-                diffusion_steps=diffusion_steps,
-                target_alpha=target_alpha,
-                warmup_steps=warmup_steps,
-                detach_P=detach_P,
-                temp=temp,
-            ),
+        # Instantiate QGFD
+        qgfd = MultiHeadQGFDLayer(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            proj_dim=proj_dim,
+            diffusion_steps=diffusion_steps,
+            target_alpha=target_alpha,
+            warmup_steps=warmup_steps,
+            kernel_size=kernel_size,
+            early_stop_eps=early_stop_eps,
         )
-        # store metadata
+        object.__setattr__(self, "qgfd", qgfd)
         object.__setattr__(self, "num_heads", num_heads)
         object.__setattr__(self, "embed_dim", embed_dim)
         object.__setattr__(self, "head_dim", proj_dim // num_heads)
 
-        # Copy public attributes and callables from orig into self
+        # Copy public attributes
         for attr in dir(orig_mod):
             if attr.startswith("_"):
                 continue
@@ -114,9 +93,8 @@ class SafeWrappedAttention(nn.Module):
             except Exception:
                 pass
 
-        # Try to copy projection weights into qgfd's q_proj/k_proj/v_proj/out_proj (best-effort)
+        # Try to copy weights
         with torch.no_grad():
-            # direct attribute mapping
             for src_name, dst_name in [
                 ("q", "q_proj"),
                 ("k", "k_proj"),
@@ -126,16 +104,16 @@ class SafeWrappedAttention(nn.Module):
             ]:
                 src = getattr(orig_mod, src_name, None)
                 if src is not None and hasattr(src, "weight"):
-                    try:
-                        getattr(self.qgfd, dst_name).weight.copy_(src.weight.data)
-                        if hasattr(src, "bias") and getattr(
-                            getattr(self.qgfd, dst_name), "bias", None
-                        ) is not None:
-                            getattr(self.qgfd, dst_name).bias.copy_(src.bias.data)
-                    except Exception:
-                        pass
+                    dst = getattr(self.qgfd, dst_name, None)
+                    if dst is not None and hasattr(dst, "weight"):
+                        try:
+                            dst.weight.copy_(src.weight.data)
+                            if hasattr(src, "bias") and getattr(dst, "bias", None) is not None:
+                                dst.bias.copy_(src.bias.data)
+                        except Exception:
+                            pass
 
-            # fallback by parameter name substring
+            # Fallback by name substring
             for n, p in orig_mod.named_parameters():
                 ln = n.lower()
                 try:
@@ -150,18 +128,15 @@ class SafeWrappedAttention(nn.Module):
                 except Exception:
                     pass
 
-        # --- STEALTH MASKING ---
-        # Rename this class instance to match the original class name.
+        # Stealth
         self.__class__.__name__ = orig_mod.__class__.__name__
 
     def __repr__(self):
-        # Delegate repr to the original module so print(model) shows no trace
         return self._orig.__repr__()
 
     def _shape_proj_for_present(self, proj_layer, x):
         proj = proj_layer(x)
         if proj.dim() != 3:
-            # best-effort; don't crash
             return proj
         b, t, d = proj.shape
         if d % self.num_heads != 0:
@@ -180,27 +155,20 @@ class SafeWrappedAttention(nn.Module):
         **kwargs,
     ):
         """
-        Return signature compatible with HF attention:
-        - (attn_output, present) or
-        - (attn_output, present, attn_weights) if output_attentions=True
+        HF-compatible attention forward:
+        returns (attn_output, present) or
+        (attn_output, present, attn_weights) if output_attentions=True
         """
         kv_input = key_value_states if key_value_states is not None else hidden_states
 
-        # Call QGFD with explicit kv + attention_mask
-        out = self.qgfd(
-            hidden_states=hidden_states,
+        attn_output, attn_probs = self.qgfd(
+            hidden_states,
             kv=kv_input,
             attention_mask=attention_mask,
             output_attentions=output_attentions,
         )
 
-        if output_attentions:
-            attn_output, attn_probs = out
-        else:
-            (attn_output,) = out
-            attn_probs = None
-
-        # present for caching (best-effort, not used inside QGFD)
+        # KV cache
         present = None
         try:
             k_proj = self._shape_proj_for_present(self.qgfd.k_proj, kv_input)
@@ -225,7 +193,6 @@ class SafeWrappedAttention(nn.Module):
         attn_weights = None
         if output_attentions and attn_probs is not None:
             try:
-                # average over heads to mimic HF attention weights
                 attn_weights = attn_probs.mean(dim=1)
             except Exception:
                 attn_weights = attn_probs
@@ -236,9 +203,7 @@ class SafeWrappedAttention(nn.Module):
             return attn_output, present
 
 
-# -------------------------------------------------------------
-# Helper traversal functions
-# -------------------------------------------------------------
+# -------- helper traversal --------
 def _get_attr_or_index(parent, part):
     if hasattr(parent, part):
         return getattr(parent, part)
@@ -266,53 +231,42 @@ def _set_submodule(root, dotted_name, new_mod):
         setattr(parent, last, new_mod)
 
 
-# -------------------------------------------------------------
-# Detect leaf attention modules
-# -------------------------------------------------------------
 def is_leaf_attention(mod: nn.Module) -> bool:
-    """
-    Very permissive attention detector:
-    - Skips modules already wrapped (have .qgfd and ._orig).
-    - Wraps anything whose class name contains 'attention' or 'attn'.
-    This works for OPTAttention, GPT2Attention, etc.
-    """
     if hasattr(mod, "qgfd") and hasattr(mod, "_orig"):
         return False
 
     clsname = mod.__class__.__name__.lower()
-    if "attention" in clsname or "attn" in clsname:
-        return True
+    if "attention" not in clsname:
+        return False
 
+    for a in ("q", "k", "v", "q_proj", "k_proj", "v_proj"):
+        if hasattr(mod, a):
+            return True
+    for n, p in mod.named_parameters(recurse=False):
+        ln = n.lower()
+        if ("q" in ln and "weight" in ln) or ("k" in ln and "weight" in ln) or ("v" in ln and "weight" in ln):
+            return True
     return False
 
 
-# -------------------------------------------------------------
-# Main public helper: wrap_model_with_qgfd
-# -------------------------------------------------------------
 def wrap_model_with_qgfd(
-    model,
+    model: nn.Module,
     MultiHeadQGFDLayer,
-    diffusion_steps=4,
-    target_alpha=0.02,
-    warmup_steps=20000,
-    detach_P=False,
-    temp=1.0,
-    last_n_layers: Optional[int] = None, # Add this argument
-    verbose=True,
+    diffusion_steps: int = 1,
+    target_alpha: float = 0.02,
+    warmup_steps: int = 0,
+    kernel_size: int = 5,
+    early_stop_eps: float = 0.0,
+    verbose: bool = True,
 ):
     """
     In-place replacement of attention modules with SafeWrappedAttention+QGFD.
     Returns the same model object (for convenience).
-
-    The resulting wrapped layers will mimic the class name of the original layers,
-    rendering them "invisible" in standard print(model) calls.
     """
-    # clean some garbage in current process (optional)
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # ---------- snapshot candidates ----------
     candidates = []
     for name, mod in model.named_modules():
         if not name:
@@ -328,7 +282,6 @@ def wrap_model_with_qgfd(
         for i, (n, cls) in enumerate(candidates[:200]):
             print(f"[{i}] {n} -> {cls}")
 
-    # ---------- instantiate wrappers (no mutation yet) ----------
     instantiated = []
     already_wrapped = []
     for name, cls in candidates:
@@ -343,7 +296,6 @@ def wrap_model_with_qgfd(
                 print("Skip candidate traversal fail:", name, e)
             continue
 
-        # skip if already our wrapper (check for stealth marker attributes)
         if hasattr(orig, "qgfd") and hasattr(orig, "_orig"):
             already_wrapped.append(name)
             if verbose:
@@ -357,8 +309,8 @@ def wrap_model_with_qgfd(
                 diffusion_steps=diffusion_steps,
                 target_alpha=target_alpha,
                 warmup_steps=warmup_steps,
-                detach_P=detach_P,
-                temp=temp,
+                kernel_size=kernel_size,
+                early_stop_eps=early_stop_eps,
             )
             instantiated.append((name, wrapper))
         except Exception as e:
@@ -370,7 +322,6 @@ def wrap_model_with_qgfd(
         print("Instantiated wrappers count:", len(instantiated))
         print("Already wrapped modules count:", len(already_wrapped))
 
-    # ---------- set wrappers ----------
     replaced = 0
     for name, wrapper in instantiated:
         try:
@@ -386,62 +337,18 @@ def wrap_model_with_qgfd(
     if verbose:
         print("Replacement pass done. Replaced:", replaced)
 
-    # ---------- NEW LOGIC: Adjust alpha for last N layers if specified ----------
-    if last_n_layers is not None and last_n_layers > 0 and instantiated:
-        # Try to get total number of layers from config (works for OPT/GPT2)
-        num_layers = getattr(model.config, "num_hidden_layers", None)
-        if num_layers is None:
-            if verbose:
-                print("  [INFO] num_hidden_layers not found in model config; skipping layer pruning.")
-        else:
-            if verbose:
-                print(f"  [INFO] Restricting QGFD to last {last_n_layers} of {num_layers} layers.")
-
-            for name, wrapped_mod in instantiated:
-                # We expect wrapped_mod to be an instance of SafeWrappedAttention
-                if not hasattr(wrapped_mod, 'qgfd'): # Should always be true for instantiated
-                    continue
-
-                layer_idx = None
-                if "decoder.layers." in name:  # OPT-style: model.decoder.layers.X.self_attn
-                    try:
-                        layer_idx = int(name.split("decoder.layers.")[1].split(".")[0])
-                    except Exception:
-                        pass
-                elif "transformer.h." in name:  # GPT-2 style: transformer.h.X.attn
-                    try:
-                        layer_idx = int(name.split("transformer.h.")[1].split(".")[0])
-                    except Exception:
-                        pass
-
-                if layer_idx is not None and num_layers is not None:
-                    if layer_idx < num_layers - last_n_layers:
-                        # This layer is NOT in the last N layers, so disable QGFD for it
-                        if hasattr(wrapped_mod.qgfd, "target_alpha"):
-                            wrapped_mod.qgfd.target_alpha = 0.0
-                            if verbose:
-                                print(f"    [INFO] Disabled QGFD (alpha=0.0) for layer {layer_idx} ({name})")
-                    # else: Keep alpha as configured for the last N layers
-
-
-    # ---------- REPLACED LAYERS SUMMARY ----------
-    if verbose:
         print("\n=== REPLACED ATTENTION LAYERS (SUMMARY) ===")
         if instantiated:
             for name, wrapper in instantiated:
-                print(
-                    f"{name} -> SafeWrappedAttention (Masked as {wrapper.__class__.__name__})"
-                )
+                print(f"{name} -> SafeWrappedAttention (Masked as {wrapper.__class__.__name__})")
         else:
             print("(No new layers wrapped this call.)")
         print("=== END OF REPLACED LAYERS ===\n")
 
-    # ---------- robust verify (only for newly instantiated wrappers) ----------
+    # Verify wrappers
     if instantiated:
         malformed = []
-        verified = []
-
-        for name, wrapper in instantiated:
+        for name, _ in instantiated:
             parts = name.split(".")
             parent = model
             try:
@@ -452,19 +359,8 @@ def wrap_model_with_qgfd(
                 malformed.append((name, f"traverse_fail:{e}"))
                 continue
 
-            ok_orig = True
-            ok_qgfd = True
-            try:
-                _orig = getattr(live, "_orig")
-            except Exception:
-                ok_orig = False
-                _orig = None
-            try:
-                _qgfd = getattr(live, "qgfd")
-            except Exception:
-                ok_qgfd = False
-                _qgfd = None
-
+            ok_orig = hasattr(live, "_orig")
+            ok_qgfd = hasattr(live, "qgfd")
             if not (ok_orig and ok_qgfd):
                 malformed.append(
                     (
@@ -473,18 +369,6 @@ def wrap_model_with_qgfd(
                             "ok_orig": ok_orig,
                             "ok_qgfd": ok_qgfd,
                             "type": type(live).__name__,
-                        },
-                    )
-                )
-            else:
-                verified.append(
-                    (
-                        name,
-                        {
-                            "wrapper_type": type(live).__name__,
-                            "orig_type": type(_orig).__name__
-                            if _orig is not None
-                            else None,
                         },
                     )
                 )
@@ -497,30 +381,14 @@ def wrap_model_with_qgfd(
             raise RuntimeError(
                 f"Malformed wrappers found: {len(malformed)}. Aborting."
             )
-
-        if verbose:
-            print("All newly created wrappers verified OK (._orig and .qgfd reachable).")
-            if verified:
-                print("Verified wrapped attention modules (showing up to 200):")
-                for name, info in verified[:200]:
-                    print(
-                        f"{name} -> wrapper={info['wrapper_type']}  orig={info['orig_type']}"
-                    )
+        elif verbose:
+            print("All newly created wrappers verified OK.")
 
     else:
-        # No new wrappers; model may already be fully wrapped
         if verbose:
             if already_wrapped:
-                print(
-                    "No new attention layers were wrapped; model appears to be already fully wrapped."
-                )
-                print("Existing SafeWrappedAttention modules (Stealth Mode Active):")
-                for name, mod in model.named_modules():
-                    if hasattr(mod, "qgfd") and hasattr(mod, "_orig"):
-                        print(f"  {name} -> {mod.__class__.__name__} (Wrapper)")
+                print("No new attention layers were wrapped; model appears already wrapped.")
             else:
-                print(
-                    "No attention layers were wrapped and no existing wrappers were found."
-                )
+                print("No attention layers were wrapped and no existing wrappers were found.")
 
     return model
