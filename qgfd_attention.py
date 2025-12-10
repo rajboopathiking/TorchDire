@@ -1,6 +1,4 @@
 import math
-from typing import Optional, Tuple
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,258 +6,423 @@ import torch.nn.functional as F
 
 class MultiHeadQGFDLayer(nn.Module):
     """
-    Production-grade QGFD Multi-Head Attention.
+    Multi-head QGFD attention layer.
 
-    Key properties:
-    - Drop-in replacement for standard multi-head attention.
-    - No full L×L transition matrix P is ever constructed.
-    - Adds a local, causal convolutional "diffusion" over the attention
-      distribution along the key dimension.
-    - Preserves causal + padding masks.
-    - When target_alpha=0 or diffusion_steps=0, it exactly reduces to
-      standard attention.
+    Modes:
+      - mode="full": use full key-based transition matrix P (O(L^2) memory)
+      - mode="conv": use local CausalConv1D smoothing over attention weights (O(L·K))
+
+    QGFD can be optionally:
+      - disabled entirely (enable_qgfd=False → plain attention)
+      - limited to short sequences in "full" mode (via max_full_seq_len + full_fallback_mode)
+
+    Args:
+        embed_dim: Dimensionality of input embeddings.
+        num_heads: Number of attention heads.
+        proj_dim: Dimensionality of projected Q/K/V vectors (defaults to embed_dim).
+        diffusion_steps: Number of diffusion steps to apply (>= 0).
+        target_alpha: Target diffusion mixing factor α.
+        warmup_steps: Steps to linearly ramp up α (for stable training).
+        use_bias: Whether to use bias in linear projections.
+        early_stop_eps: Threshold to stop diffusion early if updates are small.
+        detach_P: Whether to detach transition matrix P from autograd (for full mode).
+        temp: Temperature scaling for the key-based transition softmax (for full mode).
+        mode: "full" (global key-based P) or "conv" (local conv-based diffusion).
+        kernel_size: kernel size for conv mode (must be odd).
+        enable_qgfd: if False, skip diffusion and behave like standard attention.
+        max_alpha: upper bound for |alpha_eff| (for safety).
+        max_full_seq_len: maximum sequence length allowed in mode="full".
+        full_fallback_mode:
+            - "disable": if Lk > max_full_seq_len, skip QGFD (use p0).
+            - "conv":    if Lk > max_full_seq_len, fall back to conv-based diffusion.
+        mask_threshold: threshold for interpreting additive masks (<= threshold = masked).
+        debug: if True, logs some simple runtime diagnostics (no heavy logging).
     """
 
     def __init__(
         self,
         embed_dim: int,
         num_heads: int = 8,
-        proj_dim: Optional[int] = None,
-        diffusion_steps: int = 1,
+        proj_dim: int | None = None,
+        diffusion_steps: int = 4,
         target_alpha: float = 0.02,
-        warmup_steps: int = 0,
+        warmup_steps: int = 20000,
         use_bias: bool = True,
+        early_stop_eps: float = 1e-5,
+        detach_P: bool = False,
+        temp: float = 1.0,
+        mode: str = "full",
         kernel_size: int = 5,
-        early_stop_eps: float = 0.0,
+        enable_qgfd: bool = True,
+        max_alpha: float = 0.10,
+        max_full_seq_len: int = 512,
+        full_fallback_mode: str = "disable",
+        mask_threshold: float = -1e4,
+        debug: bool = False,
+        **kwargs,
     ):
         super().__init__()
-        self.embed_dim = int(embed_dim)
-        self.num_heads = int(num_heads)
-        self.proj_dim = int(proj_dim) if proj_dim is not None else int(embed_dim)
-        assert self.proj_dim % self.num_heads == 0, "proj_dim must be divisible by num_heads"
-        self.head_dim = self.proj_dim // self.num_heads
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.proj_dim = proj_dim if proj_dim is not None else embed_dim
+        assert self.proj_dim % num_heads == 0, "proj_dim must be divisible by num_heads"
+        self.head_dim = self.proj_dim // num_heads
 
         self.diffusion_steps = int(diffusion_steps)
         self.target_alpha = float(target_alpha)
         self.warmup_steps = int(warmup_steps)
         self.early_stop_eps = float(early_stop_eps)
+        self.detach_P = bool(detach_P)
+        self.temp = float(temp) if temp > 0.0 else 1.0
 
-        # Warmup counter for alpha
+        assert mode in ("full", "conv"), "mode must be 'full' or 'conv'"
+        self.mode = mode
+
+        self.enable_qgfd = bool(enable_qgfd)
+        self.max_alpha = float(max_alpha)
+        self.max_full_seq_len = int(max_full_seq_len)
+        assert full_fallback_mode in ("disable", "conv"), "full_fallback_mode must be 'disable' or 'conv'"
+        self.full_fallback_mode = full_fallback_mode
+        self.mask_threshold = float(mask_threshold)
+        self.debug = bool(debug)
+
+        # used for alpha warmup (and eval-time control)
         self.register_buffer("step_count", torch.zeros(1, dtype=torch.long))
 
-        # Projections
-        self.q_proj = nn.Linear(self.embed_dim, self.proj_dim, bias=use_bias)
-        self.k_proj = nn.Linear(self.embed_dim, self.proj_dim, bias=use_bias)
-        self.v_proj = nn.Linear(self.embed_dim, self.proj_dim, bias=use_bias)
-        self.out_proj = nn.Linear(self.proj_dim, self.embed_dim, bias=use_bias)
+        # projections
+        self.q_proj = nn.Linear(embed_dim, self.proj_dim, bias=use_bias)
+        self.k_proj = nn.Linear(embed_dim, self.proj_dim, bias=use_bias)
+        self.v_proj = nn.Linear(embed_dim, self.proj_dim, bias=use_bias)
+        self.out_proj = nn.Linear(self.proj_dim, embed_dim, bias=use_bias)
 
-        # Local smoothing kernel over the key dimension (conv on probs, not logits).
-        assert kernel_size >= 1 and kernel_size % 2 == 1, "kernel_size must be odd >= 1"
-        self.kernel_size = int(kernel_size)
-        self.kernel = nn.Conv1d(
-            in_channels=1,
-            out_channels=1,
-            kernel_size=self.kernel_size,
-            padding=self.kernel_size - 1,  # causal; we trim the right side
-            bias=False,
-        )
+        # --- conv mode: learnable local kernel (Toeplitz band for P) ---
+        if self.mode == "conv" or self.full_fallback_mode == "conv":
+            assert kernel_size >= 1 and kernel_size % 2 == 1, "kernel_size must be odd >= 1"
+            self.kernel_size = kernel_size
+            # Simple symmetric kernel, normalized
+            kernel = torch.ones(kernel_size, dtype=torch.float32)
+            center = kernel_size // 2
+            kernel[center] = 2.0
+            kernel = kernel / kernel.sum()
+            self.register_parameter(
+                "conv_kernel",
+                nn.Parameter(kernel.view(1, 1, kernel_size))  # (out_ch=1, in_ch=1, K)
+            )
 
-        # Initialize kernel ≈ identity (no-op at start)
-        with torch.no_grad():
-            self.kernel.weight.zero_()
-            center = self.kernel_size - 1  # causal: last position = "self"
-            self.kernel.weight[0, 0, center] = 1.0
-
-    # ----------------------------------------------------------------------
-    # alpha / warmup
-    # ----------------------------------------------------------------------
+    # ------------ alpha schedule ------------
     def get_alpha(self) -> float:
         """
-        Compute effective alpha with optional warmup.
-        If target_alpha <= 0 or diffusion_steps <= 0, returns 0.
+        Linear warmup from 0 to target_alpha over warmup_steps,
+        then clamp to [-max_alpha, max_alpha] for safety.
         """
-        if self.target_alpha <= 0.0 or self.diffusion_steps <= 0:
-            return 0.0
-
         if self.warmup_steps <= 0:
-            return float(self.target_alpha)
+            alpha = self.target_alpha
+        else:
+            factor = min(1.0, float(self.step_count.item()) / float(self.warmup_steps))
+            alpha = self.target_alpha * factor
 
-        step = float(self.step_count.item())
-        factor = min(1.0, step / float(self.warmup_steps))
-        return float(self.target_alpha * factor)
+        # safety clamp
+        alpha = max(-self.max_alpha, min(self.max_alpha, alpha))
+        return float(alpha)
 
-    # ----------------------------------------------------------------------
-    # attention mask helpers
-    # ----------------------------------------------------------------------
-    @staticmethod
-    def _apply_attention_mask_to_scores(
-        scores: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
+    # ------------ key-based transition matrix (full mode) ------------
+    def build_transition_from_keys(self, K: torch.Tensor) -> torch.Tensor:
+        """
+        Build key-based transition matrix P from keys.
+
+        Args:
+            K: (B, H, Lk, head_dim)
+
+        Returns:
+            P: (B, H, Lk, Lk) transition matrix based on cosine similarities.
+        """
+        # normalize last dim
+        K_norm = F.normalize(K, p=2, dim=-1, eps=self._eps(K))  # (B,H,Lk,head_dim)
+
+        # cosine similarity: (B,H,Lk,Lk)
+        sim = torch.einsum("bhid,bhjd->bhij", K_norm, K_norm)
+
+        # scale and temperature
+        sim = sim / max(1.0, math.sqrt(self.head_dim))
+        sim = sim / self.temp
+
+        # softmax to get transitions
+        P = F.softmax(sim, dim=-1)
+
+        # tiny jitter for numerical stability
+        jitter = self._eps(P)
+        P = P * (1.0 - jitter) + (jitter / P.size(-1))
+
+        if self.detach_P:
+            P = P.detach()
+
+        return P
+
+    # ------------ conv mode diffusion over p ------------
+    def diffuse_via_conv(
+        self,
+        p0: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        alpha_eff: float,
     ) -> torch.Tensor:
         """
-        Apply attention mask to raw scores.
+        Diffusion using a local CausalConv1D over the key dimension.
 
-        attention_mask can be:
-            - bool mask, (B, Lk) or (B, 1, 1, Lk); True = keep, False = mask.
-            - 0/1 mask of shape (B, Lk)   (1=keep, 0=mask)
-            - additive mask (B, 1, 1, Lk) (0=keep, negative=mask)
+        p0: (B,H,Lq,Lk) baseline attention
+        returns p: (B,H,Lq,Lk)
+        """
+        B, H, Lq, Lk = p0.shape
+        p = p0
+        prev_p = None
+
+        # Prepare key mask for renormalization (True = keep, False = masked)
+        key_mask = self._build_key_mask(attention_mask, B, Lk)  # (B,Lk) or None
+
+        # conv1d expects (N, C_in, L)
+        kernel = self.conv_kernel  # (1,1,K)
+        K = kernel.shape[-1]
+
+        for _ in range(self.diffusion_steps):
+            # reshape p to (N = B*H*Lq, C=1, L=Lk)
+            x = p.view(B * H * Lq, 1, Lk)
+
+            # causal padding: pad on the left by K-1
+            x_padded = F.pad(x, (K - 1, 0))  # (N,1,Lk+K-1)
+
+            x_conv = F.conv1d(x_padded, kernel, groups=1)  # (N,1,Lk)
+
+            # reshape back
+            p_conv = x_conv.view(B, H, Lq, Lk)
+
+            # zero-out masked keys if we have a key_mask
+            if key_mask is not None:
+                km = key_mask.view(B, 1, 1, Lk)  # (B,1,1,Lk)
+                p_conv = p_conv * km.to(p_conv.dtype)
+
+            # renormalize per query so distribution sums to 1 over keys
+            p_conv = p_conv.clamp(min=self._eps(p_conv))
+            Z = p_conv.sum(dim=-1, keepdim=True)  # (B,H,Lq,1)
+            # Avoid division by zero, just in case all keys masked
+            Z = Z.clamp(min=self._eps(Z))
+            p_conv = p_conv / Z
+
+            # mix with original p0
+            p_next = (1.0 - alpha_eff) * p0 + alpha_eff * p_conv
+
+            # early stop on small change
+            if (
+                prev_p is not None
+                and torch.max(torch.abs(p_next - prev_p)) < self.early_stop_eps
+            ):
+                p = p_next
+                break
+
+            prev_p = p
+            p = p_next
+
+        return p
+
+    # ------------ mask handling ------------
+    def apply_attention_mask(self, scores: torch.Tensor, attention_mask: torch.Tensor | None) -> torch.Tensor:
+        """
+        attention_mask: can be
+            - (B, Lk)        bool or additive
+            - (B, 1, 1, Lk)  additive (HF style)
+            - bool mask      (True = keep, False = mask)
+            - additive mask  already in logits space
+
+        Returns:
+            scores with additive mask applied.
         """
         if attention_mask is None:
             return scores
 
         if attention_mask.dtype == torch.bool:
+            # bool mask: True = keep, False = mask
             additive = (~attention_mask).to(scores.dtype) * -1e9
         else:
-            if (
-                attention_mask.dim() == 2
-                and attention_mask.max() <= 1.0
-                and attention_mask.min() >= 0.0
-            ):
-                additive = (1.0 - attention_mask.to(scores.dtype)) * -1e9
-            else:
-                additive = attention_mask.to(scores.dtype)
+            # assume HF-style additive mask: 0 for keep, large negative for masked
+            additive = attention_mask.to(scores.dtype)
 
         if additive.dim() == 2:
             additive = additive[:, None, None, :]  # (B,1,1,Lk)
 
         return scores + additive
 
-    @staticmethod
-    def _extract_key_valid_mask(
-        attention_mask: Optional[torch.Tensor],
-        Lk: int,
-    ) -> Optional[torch.Tensor]:
+    def _build_key_mask(self, attention_mask: torch.Tensor | None, B: int, Lk: int) -> torch.Tensor | None:
         """
-        Returns a (B, Lk) bool mask: True = key is valid (non-padding).
-        Used to zero out smoothed probabilities on padding positions.
+        Attempt to build a boolean key mask (B,Lk) from attention_mask.
+
+        True = valid key, False = masked-out key.
+
+        This is used in conv mode for zeroing and renormalization. If
+        we can't infer a clean key mask, returns None and we trust p0.
         """
         if attention_mask is None:
             return None
 
         if attention_mask.dtype == torch.bool:
-            if attention_mask.dim() == 2:
-                return attention_mask
-            if attention_mask.dim() == 4:
-                return attention_mask[:, 0, 0, :]
+            am = attention_mask
+            # am may be (B,Lk) or (B,1,1,Lk)
+            if am.dim() == 4:
+                am = am[:, 0, 0, :]
+            return am
 
-        if attention_mask.dim() == 2:
-            if attention_mask.max() <= 1.0 and attention_mask.min() >= 0.0:
-                return attention_mask > 0.5
-            return attention_mask >= 0.0
+        # additive mask: 0 for keep, large negative for masked.
+        am = attention_mask
+        if am.dim() == 4:
+            am = am[:, 0, 0, :]  # (B,Lk) or (B,seq_len) depending on caller
 
-        if attention_mask.dim() == 4:
-            m = attention_mask[:, 0, 0, :]
-            return m >= 0.0
+        if am.dim() != 2 or am.shape[0] != B or am.shape[1] != Lk:
+            # shape mismatch; bail out
+            return None
 
-        return None
+        # positions <= mask_threshold are considered masked
+        key_mask = ~(am <= self.mask_threshold)
+        return key_mask
 
-    # ----------------------------------------------------------------------
-    # local diffusion over attention probabilities
-    # ----------------------------------------------------------------------
-    def _local_diffusion_probs(
-        self,
-        p0: torch.Tensor,
-        key_valid: Optional[torch.Tensor] = None,
-        alpha: float = 0.0,
-    ) -> torch.Tensor:
+    # ------------ dtype-aware epsilon ------------
+    @staticmethod
+    def _eps(x: torch.Tensor) -> float:
         """
-        Perform local diffusion over attention probabilities along key dimension.
-
-        p0: (B,H,Lq,Lk), each row sums to 1 and is already masked.
-        key_valid: (B,Lk) bool or None (True = valid key; False = padding).
-        alpha: mixing coefficient.
+        Return a small epsilon appropriate to dtype.
         """
-        if alpha <= 0.0 or self.diffusion_steps <= 0:
-            return p0
+        if x.dtype in (torch.float16, torch.bfloat16):
+            return 1e-3
+        else:
+            return 1e-6
 
-        B, H, Lq, Lk = p0.shape
-        p = p0
-
-        for _ in range(self.diffusion_steps):
-            p_flat = p.view(B * H * Lq, 1, Lk)  # (B*H*Lq, 1, Lk)
-
-            kernel = F.softmax(self.kernel.weight, dim=-1)  # (1,1,K)
-            p_smooth = F.conv1d(p_flat, kernel, padding=self.kernel_size - 1)
-            p_smooth = p_smooth[..., :Lk]
-            p_smooth = p_smooth.view(B, H, Lq, Lk)
-
-            if key_valid is not None:
-                mask = key_valid[:, None, None, :]  # (B,1,1,Lk)
-                p_smooth = p_smooth * mask
-
-            denom = p_smooth.sum(dim=-1, keepdim=True) + 1e-9
-            p_smooth = p_smooth / denom
-
-            p_next = (1.0 - alpha) * p + alpha * p_smooth
-
-            if self.early_stop_eps > 0.0:
-                if torch.max(torch.abs(p_next - p)) < self.early_stop_eps:
-                    p = p_next
-                    break
-
-            p = p_next
-
-        return p
-
-    # ----------------------------------------------------------------------
-    # forward
-    # ----------------------------------------------------------------------
+    # ------------ forward ------------
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        kv: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        head_mask: torch.Tensor | None = None,
         output_attentions: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        **kwargs,
+    ):
         """
         Args:
-            hidden_states : (B, Lq, D)
-            kv            : (B, Lk, D) or None (self-attention if None).
-            attention_mask: HF-style attention mask applied to QK scores.
-            output_attentions: If True, returns final probabilities p.
+            hidden_states: (B, Lq, D)
+            kv: optional key/value input (B, Lk, D). If None, self-attn on hidden_states.
+            attention_mask: HF-style attention mask.
+            head_mask: optional per-head scaling.
+            output_attentions: whether to return attention probabilities.
 
         Returns:
-            attn_out: (B, Lq, D)
-            p       : (B, H, Lq, Lk) if output_attentions=True, else None
+            If output_attentions:
+                (attn_output, p)
+            else:
+                (attn_output,)
         """
         B, Lq, D = hidden_states.shape
         if kv is None:
             kv = hidden_states
-        B2, Lk, D2 = kv.shape
-        assert B2 == B and D2 == D, "hidden_states and kv must have same batch and dim"
+        Lk = kv.shape[1]
 
-        dtype = hidden_states.dtype
+        # project and reshape to (B, H, L, head_dim)
+        Q = (
+            self.q_proj(hidden_states)
+            .view(B, Lq, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )  # (B,H,Lq,hd)
+        K = (
+            self.k_proj(kv)
+            .view(B, Lk, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )  # (B,H,Lk,hd)
+        V = (
+            self.v_proj(kv)
+            .view(B, Lk, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )  # (B,H,Lk,hd)
 
-        Q = self.q_proj(hidden_states)
-        K = self.k_proj(kv)
-        V = self.v_proj(kv)
-
-        Q = Q.view(B, Lq, self.num_heads, self.head_dim).transpose(1, 2)  # (B,H,Lq,hd)
-        K = K.view(B, Lk, self.num_heads, self.head_dim).transpose(1, 2)  # (B,H,Lk,hd)
-        V = V.view(B, Lk, self.num_heads, self.head_dim).transpose(1, 2)  # (B,H,Lk,hd)
-
+        # scaled dot-product scores (before softmax)
         scores = torch.einsum("bhqd,bhkd->bhqk", Q, K) / math.sqrt(self.head_dim)
-        scores = self._apply_attention_mask_to_scores(scores, attention_mask)
 
+        # apply attention mask
+        scores = self.apply_attention_mask(scores, attention_mask)
+
+        # baseline softmax attention distribution
         p0 = F.softmax(scores, dim=-1)  # (B,H,Lq,Lk)
-        key_valid = self._extract_key_valid_mask(attention_mask, Lk)
-        alpha = float(self.get_alpha())
 
-        p = self._local_diffusion_probs(p0, key_valid=key_valid, alpha=alpha)
+        # decide if QGFD is active
+        alpha_eff = self.get_alpha()
+        qgfd_active = (
+            self.enable_qgfd
+            and self.diffusion_steps > 0
+            and abs(alpha_eff) > 0.0
+        )
 
-        attn_out = torch.einsum("bhqk,bhkd->bhqd", p, V)
-        attn_out = (
-            attn_out.transpose(1, 2)
+        if not qgfd_active:
+            p = p0
+        else:
+            # optionally guard full mode on long sequences
+            mode = self.mode
+            if mode == "full" and Lk > self.max_full_seq_len:
+                if self.full_fallback_mode == "conv":
+                    mode = "conv"
+                    if self.debug:
+                        print(
+                            f"[QGFD] full mode disabled for Lk={Lk} > {self.max_full_seq_len}, "
+                            f"falling back to conv mode."
+                        )
+                else:  # "disable"
+                    if self.debug:
+                        print(
+                            f"[QGFD] full mode disabled for Lk={Lk} > {self.max_full_seq_len}, "
+                            f"falling back to plain attention."
+                        )
+                    p = p0
+                    mode = None  # skip diffusion
+
+            if mode is None:
+                p = p0
+            elif mode == "full":
+                # key-based global transition
+                P = self.build_transition_from_keys(K)  # (B,H,Lk,Lk)
+                p = p0
+                prev_p = None
+
+                for _ in range(self.diffusion_steps):
+                    # p_{t+1} = (1 - alpha) * p0 + alpha * (p_t @ P)
+                    p_next = (1.0 - alpha_eff) * p0 + alpha_eff * torch.einsum(
+                        "bhqn,bhnm->bhqm", p, P
+                    )
+
+                    # early stop on small change
+                    if (
+                        prev_p is not None
+                        and torch.max(torch.abs(p_next - prev_p)) < self.early_stop_eps
+                    ):
+                        p = p_next
+                        break
+
+                    prev_p = p
+                    p = p_next
+            else:
+                # conv-based local diffusion (CausalConv1D)
+                p = self.diffuse_via_conv(p0, attention_mask, alpha_eff)
+
+        # optional per-head scaling
+        if head_mask is not None:
+            p = p * head_mask.view(1, -1, 1, 1)
+
+        # attention output
+        attn_output_raw = torch.einsum("bhqk,bhkd->bhqd", p, V)  # (B,H,Lq,hd)
+        attn_output_raw = (
+            attn_output_raw.transpose(1, 2)
             .contiguous()
             .view(B, Lq, self.proj_dim)
         )
-        attn_out = self.out_proj(attn_out).to(dtype)
+        attn_output = self.out_proj(attn_output_raw)  # final projection back to embed_dim
 
-        with torch.no_grad():
-            self.step_count += 1
-            if self.step_count.item() > 10**12:
-                self.step_count.zero_()
+        # increment step counter with overflow protection
+        self.step_count += 1
+        if self.step_count.item() > 10**12:
+            self.step_count.zero_()
 
         if output_attentions:
-            return attn_out, p
-        return attn_out, None
+            return (attn_output, p)
+        return (attn_output,)
