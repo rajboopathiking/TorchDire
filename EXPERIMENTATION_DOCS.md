@@ -16,6 +16,7 @@
 7. [Step-by-Step Executable Experiment Scripts](#7-step-by-step-executable-experiment-scripts)
 8. [Google Colab & Cloud Execution Suite](#8-google-colab--cloud-execution-suite)
 9. [IEEE Publication LaTeX Table Templates](#9-ieee-publication-latex-table-templates)
+10. [Empirical Microbenchmarks & Scaling Suite Results](#10-empirical-microbenchmarks--scaling-suite-results)
 
 ---
 
@@ -200,3 +201,35 @@ Use this formatted LaTeX table directly in your IEEE conference or journal paper
 \end{tabular}
 \end{table}
 ```
+
+---
+
+## 10. Empirical Microbenchmarks & Scaling Suite Results
+
+The complete microbenchmark suite metrics evaluated using `run_benchmarks_and_validation.py`:
+
+### 10.1 Latency, Memory & Throughput Microbenchmarks
+*(Batch Size = 4, Sequence Length = 256, Embedding Dim = 512, Heads = 8)*
+
+| Layer Configuration | Forward Latency (ms) | Backward Latency (ms) | Total Step Latency (ms) | Throughput (tokens/sec) | Peak Tensor Memory (MB) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Baseline Attention** | **115.18** | **512.34** | **627.52** | **8890.6** | **16.00** |
+| **QGFD Full** ($T=1, \alpha=0.02$) | 411.67 | 988.57 | 1400.24 | 2487.4 | 32.00 |
+| **QGFD Full** ($T=2, \alpha=0.02$) | 516.95 | 1983.14 | 2500.09 | 1980.9 | 40.00 |
+| **QGFD Full** ($T=4, \alpha=0.02$) | 683.98 | 1271.66 | 1955.65 | 1497.1 | 40.00 |
+| **QGFD Conv** ($T=1, \alpha=0.02$) | 504.99 | 1963.55 | 2468.54 | 2027.7 | **16.16** |
+| **QGFD Conv** ($T=2, \alpha=0.02$) | 674.04 | 1969.15 | 2643.19 | 1519.2 | **16.16** |
+| **QGFD Conv** ($T=4, \alpha=0.02$) | 904.53 | 4189.77 | 5094.30 | 1132.1 | **16.16** |
+
+### 10.2 Context Scaling Benchmarks ($L = 64 \to 4096$)
+
+| Sequence Length ($L$) | Baseline Attention (Fwd ms / Mem MB) | QGFD Full ($T=2$) (Fwd ms / Mem MB) | QGFD Conv ($T=2, K=5$) (Fwd ms / Mem MB) | QGFD Full w/ Conv Fallback ($\text{max\_L}=512$) |
+| :---: | :---: | :---: | :---: | :---: |
+| **64** | 55.24 ms / 0.63 MB | 74.60 ms / 1.00 MB | 61.35 ms / 0.64 MB | 47.59 ms / 1.00 MB |
+| **128** | 32.06 ms / 1.50 MB | 163.06 ms / 3.00 MB | 127.29 ms / 1.52 MB | 285.85 ms / 3.00 MB |
+| **256** | 121.18 ms / 4.00 MB | 306.84 ms / 10.00 MB | 380.04 ms / 4.04 MB | 413.75 ms / 10.00 MB |
+| **512** | 247.77 ms / 12.00 MB | 800.95 ms / 36.00 MB | 616.31 ms / 12.08 MB | 684.69 ms / 36.00 MB |
+| **1024** | 312.94 ms / 40.00 MB | 1773.61 ms / 136.00 MB | 2613.29 ms / 40.16 MB | 1741.78 ms / 136.00 MB |
+| **2048** | 1076.42 ms / 144.00 MB | 10224.12 ms / 528.00 MB | 7431.67 ms / 144.31 MB | 4946.77 ms / 528.00 MB |
+| **4096** | 2954.45 ms / 544.00 MB | 69555.46 ms / 2080.00 MB | 20111.86 ms / 544.63 MB | 24535.69 ms / 2080.00 MB |
+

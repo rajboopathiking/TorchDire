@@ -85,6 +85,10 @@ class MultiHeadQGFDLayer(nn.Module):
         self.full_fallback_mode = full_fallback_mode
         self.mask_threshold = float(mask_threshold)
         self.debug = bool(debug)
+        self.learnable_alpha = bool(kwargs.get("learnable_alpha", False))
+
+        if self.learnable_alpha:
+            self.alpha_param = nn.Parameter(torch.full((num_heads,), fill_value=float(target_alpha)))
 
         # used for alpha warmup (and eval-time control)
         self.register_buffer("step_count", torch.zeros(1, dtype=torch.long))
@@ -110,18 +114,21 @@ class MultiHeadQGFDLayer(nn.Module):
             )
 
     # ------------ alpha schedule ------------
-    def get_alpha(self) -> float:
+    def get_alpha(self) -> float | torch.Tensor:
         """
         Linear warmup from 0 to target_alpha over warmup_steps,
         then clamp to [-max_alpha, max_alpha] for safety.
         """
         if self.warmup_steps <= 0:
-            alpha = self.target_alpha
+            factor = 1.0
         else:
             factor = min(1.0, float(self.step_count.item()) / float(self.warmup_steps))
-            alpha = self.target_alpha * factor
 
-        # safety clamp
+        if self.learnable_alpha:
+            alpha = self.alpha_param * factor
+            return torch.clamp(alpha, -self.max_alpha, self.max_alpha).view(1, self.num_heads, 1, 1)
+
+        alpha = self.target_alpha * factor
         alpha = max(-self.max_alpha, min(self.max_alpha, alpha))
         return float(alpha)
 
@@ -349,10 +356,11 @@ class MultiHeadQGFDLayer(nn.Module):
 
         # decide if QGFD is active
         alpha_eff = self.get_alpha()
+        alpha_nonzero = (alpha_eff != 0.0).any().item() if isinstance(alpha_eff, torch.Tensor) else abs(alpha_eff) > 0.0
         qgfd_active = (
             self.enable_qgfd
             and self.diffusion_steps > 0
-            and abs(alpha_eff) > 0.0
+            and alpha_nonzero
         )
 
         if not qgfd_active:

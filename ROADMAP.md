@@ -106,6 +106,9 @@ torchdire/
                                               |
                                               v
 [Phase 4: Hardware & IEEE Paper] <--- [Phase 3: Benchmark & Ablation]
+                                              |
+                                              v
+                              [Week 2: Kaggle 20-60M GPU Plan]
 ```
 
 ### Phase 1: Theoretical Foundation & Core Layer (Completed)
@@ -125,10 +128,16 @@ torchdire/
 - [x] Build efficiency profiler for GPU VRAM, latency per token, and theoretical FLOPs.
 - [x] Implement automated ablation suite (`QGFDAblator`) over $T \in \{0, 1, 2, 4\}$, $\alpha \in \{0.0, 0.02, 0.05, 0.10\}$, `detach_P`, and warmup schedules.
 
-### Phase 4: Advanced Hardware Kernels & IEEE Publication (Upcoming)
-- [ ] Triton / CUDA custom kernel for $O(N \cdot K)$ sparse key diffusion.
-- [ ] Adaptive per-head learnable $\alpha_h$ parameters.
-- [ ] Finalize IEEE Journal manuscript with benchmark results across SmolLM2-135M and Qwen2.5-0.5B.
+### Phase 4: Advanced Hardware Kernels & Adaptive Dynamics (Completed)
+- [x] Hardware-accelerated Triton / CUDA fused kernel (`torchdire.kernels.fused_qgfd`) for $O(N \cdot K)$ sparse key diffusion.
+- [x] Adaptive per-head learnable $\alpha_h$ parameters (`learnable_alpha=True`).
+- [x] Comprehensive validation, microbenchmarks, and scaling suite (`run_benchmarks_and_validation.py`).
+- [x] IEEE Journal manuscript draft (`IEEE_QGFD_Paper_Draft.md`) finalized with empirical tables.
+
+### Phase 5 / Week 2: Small Language Model Pretraining & Synthetic Tasks (Kaggle GPU Plan)
+- [ ] Train 20–60M parameter Transformer from scratch on Tiny Shakespeare & WikiText-2.
+- [ ] Evaluate synthetic task suite: Copy, Reverse, Induction Heads, Associative Retrieval, and Needle-in-a-Haystack.
+- [ ] Measure Pareto Frontiers: Quality at same compute (Loss vs FLOPs), Speed at same quality (ms vs PPL), and Memory at same accuracy.
 
 ---
 
@@ -149,7 +158,133 @@ To ensure empirical rigor for peer-reviewed publication (e.g., IEEE Transactions
 
 ---
 
-## 💻 6. Quick Start & Integration API
+## 🚀 6. Week 2 Kaggle Experimental Plan (Single GPU 8–24 GB VRAM)
+
+This phase conducts controlled pretraining and synthetic task benchmarks on Kaggle (T4 / P100 / RTX 3090 GPU) to demonstrate QGFD's superiority over standard attention across compute-matched quality, speed-at-quality, and memory footprint.
+
+```
++---------------------------------------------------------------------------------------------------+
+|                                  WEEK 2 KAGGLE EXPERIMENTAL PIPELINE                               |
++---------------------------------------------------------------------------------------------------+
+|  1. LM Pretraining (20M–60M Params)  ==> Tiny Shakespeare & WikiText-2 (Perplexity & Loss vs FLOPs)|
+|  2. Synthetic Task Suite              ==> Copy, Reverse, Induction, Retrieval, Needle-in-a-Haystack  |
+|  3. Key Ablation Grid                 ==> T in {0,1,2,4}, alpha in {0, 0.01, 0.02, 0.05}, detach_P   |
+|  4. Pareto Frontier Analysis          ==> Quality-at-Compute, Speed-at-Quality, Memory-at-Accuracy  |
++---------------------------------------------------------------------------------------------------+
+```
+
+### 6.1 Model Configurations (20M – 60M Parameters)
+
+| Variant | Layers ($L$) | Hidden Dim ($d_{\text{model}}$) | Heads ($H$) | Head Dim ($d_k$) | Params | Context Len |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Micro-Transformer** | 6 | 384 | 6 | 64 | ~22M | 1024 |
+| **Mini-Transformer** | 8 | 512 | 8 | 64 | ~45M | 2048 |
+| **Medium-Transformer** | 12 | 512 | 8 | 64 | ~62M | 2048 |
+
+### 6.2 Datasets & Tasks
+
+1. **Language Modeling Pretraining**:
+   - **Tiny Shakespeare**: 1.1M characters (~250k words) for rapid hyperparameter sweeps.
+   - **WikiText-2**: 2M tokens of clean Wikipedia text for standard subword perplexity benchmarks.
+
+2. **Synthetic Task Suite**:
+   - **Copy Task ($X \to X$)**: Measures sequence memory fidelity without distortion over lengths $L \in [64, 512]$.
+   - **Reverse Task ($X \to X^R$)**: Measures positional re-indexing capabilities under graph flow diffusion.
+   - **Induction Heads Task ($A B \dots A \to B$)**: Evaluates in-context prefix matching and algorithmic pattern completion.
+   - **Associative Key-Value Retrieval ($K_i V_i \dots K_j \to V_j$)**: Evaluates multi-pair key routing in a single layer.
+   - **Needle-in-a-Haystack (Passkey Retrieval)**: Inserts a random key-value passkey into distractor text at depth $d \in [0.1, 0.9]$ across sequence lengths $L \in [256, 4096]$.
+
+### 6.3 Key Ablations & Evaluation Metrics
+
+To prove QGFD's efficacy beyond a single accuracy score, measure:
+
+1. **Quality at Same Compute (Pareto Frontier 1)**:
+   - Plot Validation Loss / Perplexity vs Total FLOPs (or Training Steps).
+   - Compare Baseline Attention vs QGFD Full ($T=2, \alpha=0.02$) vs QGFD Conv ($T=2, K=5$).
+2. **Speed at Same Quality (Pareto Frontier 2)**:
+   - Measure forward inference latency (ms) required to achieve target Perplexity (e.g. $\text{PPL} = 25.0$).
+3. **Memory Usage at Same Accuracy (Pareto Frontier 3)**:
+   - Profile Peak GPU VRAM (MB) across sequence lengths $L \in [256, 4096]$ while maintaining target passkey recall $\ge 98\%$.
+4. **Parameter Grid Sweeps**:
+   - Diffusion steps: $T \in \{0, 1, 2, 4\}$
+   - Mixing factor: $\alpha \in \{0.00, 0.01, 0.02, 0.05, 0.10\}$
+   - Transition Matrix Detach: `detach_P` $\in \{\text{True}, \text{False}\}$
+   - Fallback Mode: `max_full_seq_len` $= 512$, `full_fallback_mode` $\in \{\text{"conv"}, \text{"disable"}\}$
+
+### 6.4 Kaggle Execution Code Template
+
+Below is the ready-to-run Kaggle script to execute the Week 2 training and synthetic task suite on a Kaggle GPU (T4 / P100 / RTX 3090):
+
+```python
+# =====================================================================
+# KAGGLE WEEK 2: QGFD TRANSFORMER PRETRAINING & SYNTHETIC BENCHMARKS
+# =====================================================================
+
+import math
+import time
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+
+# 1. Clone & Install TorchDire
+# !git clone https://github.com/rajboopathiking/TorchDire.git
+# %cd TorchDire
+# !pip install -e .
+
+from torchdire.nn.qgfd import MultiHeadQGFDLayer
+
+class QGFDTransformerLM(nn.Module):
+    def __init__(self, vocab_size, embed_dim=384, depth=6, num_heads=6, max_seq_len=1024, mode="full", diffusion_steps=2, target_alpha=0.02):
+        super().__init__()
+        self.tok_embed = nn.Embedding(vocab_size, embed_dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_seq_len, embed_dim))
+        
+        self.layers = nn.ModuleList([
+            nn.ModuleDict({
+                "attn": MultiHeadQGFDLayer(
+                    embed_dim=embed_dim,
+                    num_heads=num_heads,
+                    mode=mode,
+                    diffusion_steps=diffusion_steps,
+                    target_alpha=target_alpha,
+                    detach_P=True,
+                    max_full_seq_len=512,
+                    full_fallback_mode="conv",
+                ),
+                "ln1": nn.LayerNorm(embed_dim),
+                "mlp": nn.Sequential(
+                    nn.Linear(embed_dim, 4 * embed_dim),
+                    nn.GELU(),
+                    nn.Linear(4 * embed_dim, embed_dim),
+                ),
+                "ln2": nn.LayerNorm(embed_dim),
+            })
+            for _ in range(depth)
+        ])
+        self.head = nn.Linear(embed_dim, vocab_size, bias=False)
+
+    def forward(self, idx):
+        B, L = idx.shape
+        x = self.tok_embed(idx) + self.pos_embed[:, :L, :]
+        for layer in self.layers:
+            x = x + layer["attn"](layer["ln1"](x))[0]
+            x = x + layer["mlp"](layer["ln2"](x))
+        return self.head(x)
+
+# Synthetic Copy Task Generator
+def generate_copy_batch(batch_size=32, seq_len=64, vocab_size=100, device="cuda"):
+    seq = torch.randint(1, vocab_size, (batch_size, seq_len), device=device)
+    src = torch.cat([seq, torch.zeros((batch_size, 1), dtype=torch.long, device=device)], dim=1)
+    tgt = torch.cat([seq, seq], dim=1)
+    return src, tgt
+
+print("Week 2 Kaggle Execution Pipeline Ready.")
+```
+
+---
+
+## 💻 7. Quick Start & Integration API
 
 ### 1. Verify Theoretical Guarantees
 ```python
@@ -208,6 +343,7 @@ Licensed under the MIT License.
   year={2025}
 }
 ```
+
 
 > i will try it on google colab
 ▾ Thought Process

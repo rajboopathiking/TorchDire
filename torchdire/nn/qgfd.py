@@ -70,6 +70,10 @@ class MultiHeadQGFDLayer(nn.Module):
         self.full_fallback_mode = full_fallback_mode
         self.mask_threshold = float(mask_threshold)
         self.debug = bool(debug)
+        self.learnable_alpha = bool(kwargs.get("learnable_alpha", False))
+
+        if self.learnable_alpha:
+            self.alpha_param = nn.Parameter(torch.full((num_heads,), fill_value=float(target_alpha)))
 
         # Buffer to keep track of steps for warmup
         self.register_buffer("step_count", torch.zeros(1, dtype=torch.long))
@@ -93,14 +97,18 @@ class MultiHeadQGFDLayer(nn.Module):
                 nn.Parameter(kernel.view(1, 1, kernel_size)),
             )
 
-    def get_alpha(self) -> float:
-        """Calculate effective alpha based on warmup step count and max_alpha bound."""
+    def get_alpha(self) -> float | torch.Tensor:
+        """Calculate effective alpha (scalar or per-head tensor) based on warmup step count and max_alpha bound."""
         if self.warmup_steps <= 0:
-            alpha = self.target_alpha
+            factor = 1.0
         else:
             factor = min(1.0, float(self.step_count.item()) / float(self.warmup_steps))
-            alpha = self.target_alpha * factor
 
+        if self.learnable_alpha:
+            alpha = self.alpha_param * factor
+            return torch.clamp(alpha, -self.max_alpha, self.max_alpha).view(1, self.num_heads, 1, 1)
+
+        alpha = self.target_alpha * factor
         return float(max(-self.max_alpha, min(self.max_alpha, alpha)))
 
     def build_transition_from_keys(self, K: torch.Tensor) -> torch.Tensor:
@@ -229,7 +237,8 @@ class MultiHeadQGFDLayer(nn.Module):
         p0 = F.softmax(scores, dim=-1)
 
         alpha_eff = self.get_alpha()
-        qgfd_active = self.enable_qgfd and self.diffusion_steps > 0 and abs(alpha_eff) > 0.0
+        alpha_nonzero = (alpha_eff != 0.0).any().item() if isinstance(alpha_eff, torch.Tensor) else abs(alpha_eff) > 0.0
+        qgfd_active = self.enable_qgfd and self.diffusion_steps > 0 and alpha_nonzero
 
         if not qgfd_active:
             p = p0

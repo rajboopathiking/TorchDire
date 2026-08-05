@@ -308,6 +308,18 @@ model = wrap_model_with_qgfd(
 
 ---
 
+## 📊 Empirical Benchmarks & Correctness Verification
+
+Run the full correctness, numerical stability, autograd, microbenchmark, and sequence scaling suite via:
+
+```bash
+python run_benchmarks_and_validation.py
+```
+
+See [DOCUMENTATION.md](DOCUMENTATION.md#9-empirical-validation--microbenchmark-suite-results) and [EXPERIMENTATION_DOCS.md](EXPERIMENTATION_DOCS.md#10-empirical-microbenchmarks--scaling-suite-results) for full detailed theoretical proofs, empirical tables, and memory/latency scaling curves.
+
+---
+
 ## 📦 Installation
 
 1. **Clone:**
