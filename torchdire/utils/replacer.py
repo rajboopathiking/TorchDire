@@ -3,6 +3,7 @@ import traceback
 import torch
 import torch.nn as nn
 from torchdire.nn.qgfd import MultiHeadQGFDLayer
+from torchdire.nn.llama_qgfd import HAS_LLAMA, LlamaAttention, patch_llama_with_qgfd
 
 
 class SafeWrappedAttention(nn.Module):
@@ -201,9 +202,33 @@ def wrap_model_with_qgfd(
     **qgfd_kwargs,
 ) -> nn.Module:
     """
-    Recursively replaces all attention modules in model with SafeWrappedAttention containing QGFD.
+    Recursively replaces attention modules in model with QGFD.
+    For Llama models, uses zero-overhead subclassing (patch_llama_with_qgfd).
+    For other architectures, uses SafeWrappedAttention.
     """
     gc.collect()
+
+    # Check if model contains LlamaAttention
+    has_llama_layers = False
+    if HAS_LLAMA:
+        for mod in model.modules():
+            if isinstance(mod, LlamaAttention):
+                has_llama_layers = True
+                break
+
+    if has_llama_layers:
+        if verbose:
+            print("[QGFD Replacer] Detected Llama model architecture. Applying direct LlamaQGFDAttention subclassing.")
+        return patch_llama_with_qgfd(
+            model,
+            diffusion_steps=diffusion_steps,
+            target_alpha=target_alpha,
+            warmup_steps=warmup_steps,
+            kernel_size=kernel_size,
+            early_stop_eps=early_stop_eps,
+            verbose=verbose,
+            **qgfd_kwargs,
+        )
 
     candidates = []
     for name, mod in model.named_modules():

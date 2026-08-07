@@ -1,0 +1,219 @@
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Optional, Tuple, Union
+
+try:
+    from transformers.models.llama.modeling_llama import (
+        LlamaAttention,
+        LlamaConfig,
+        apply_rotary_pos_emb,
+        repeat_kv,
+    )
+    from transformers.cache_utils import Cache
+    HAS_LLAMA = True
+except ImportError:
+    HAS_LLAMA = False
+    LlamaAttention = object
+    LlamaConfig = object
+
+from torchdire.nn.qgfd_kernel import QGFDKernel
+
+
+if HAS_LLAMA:
+    class LlamaQGFDAttention(LlamaAttention):
+        """
+        QGFD Attention module for Hugging Face LLaMA models.
+
+        Subclasses LlamaAttention directly, preserving original q_proj, k_proj, v_proj, o_proj,
+        rotary_emb, KV cache, and GQA/MQA handling. Replaces only softmax(attn_scores) with QGFDKernel.
+        """
+
+        def __init__(
+            self,
+            config: LlamaConfig,
+            layer_idx: Optional[int] = None,
+            diffusion_steps: int = 4,
+            target_alpha: float = 0.02,
+            warmup_steps: int = 20000,
+            early_stop_eps: float = 1e-5,
+            detach_P: bool = False,
+            temp: float = 1.0,
+            mode: str = "full",
+            kernel_size: int = 5,
+            enable_qgfd: bool = True,
+            max_alpha: float = 0.10,
+            max_full_seq_len: int = 512,
+            full_fallback_mode: str = "disable",
+            mask_threshold: float = -1e4,
+            debug: bool = False,
+            learnable_alpha: bool = False,
+            **kwargs,
+        ):
+            super().__init__(config, layer_idx=layer_idx)
+            self.qgfd = QGFDKernel(
+                diffusion_steps=diffusion_steps,
+                target_alpha=target_alpha,
+                warmup_steps=warmup_steps,
+                early_stop_eps=early_stop_eps,
+                detach_P=detach_P,
+                temp=temp,
+                mode=mode,
+                kernel_size=kernel_size,
+                enable_qgfd=enable_qgfd,
+                max_alpha=max_alpha,
+                max_full_seq_len=max_full_seq_len,
+                full_fallback_mode=full_fallback_mode,
+                mask_threshold=mask_threshold,
+                debug=debug,
+                learnable_alpha=learnable_alpha,
+                num_heads=config.num_attention_heads,
+                **kwargs,
+            )
+
+        def forward(
+            self,
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_value: Optional[Cache] = None,
+            output_attentions: bool = False,
+            use_cache: bool = False,
+            cache_position: Optional[torch.LongTensor] = None,
+            **kwargs,
+        ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+            bsz, q_len, _ = hidden_states.size()
+            if position_ids is None:
+                position_ids = torch.arange(0, q_len, device=hidden_states.device).unsqueeze(0)
+
+            if self.config.pretraining_tp > 1:
+                key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+                query_slices = self.q_proj.weight.split(
+                    (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
+                )
+                key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
+                value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
+
+                query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+                query_states = torch.cat(query_states, dim=-1)
+
+                key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+                key_states = torch.cat(key_states, dim=-1)
+
+                value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+                value_states = torch.cat(value_states, dim=-1)
+            else:
+                query_states = self.q_proj(hidden_states)
+                key_states = self.k_proj(hidden_states)
+                value_states = self.v_proj(hidden_states)
+
+            query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+            key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+            cos, sin = self.rotary_emb(value_states, position_ids)
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+            if past_key_value is not None:
+                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+            if attention_mask is not None:
+                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+                scores = attn_weights + causal_mask
+            else:
+                scores = attn_weights
+
+            # --- QGFD Diffusion kernel replaces standard softmax ---
+            attn_weights = self.qgfd(
+                scores=scores,
+                key_states=key_states,
+                attention_mask=None,
+            ).to(query_states.dtype)
+
+            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            attn_output = torch.matmul(attn_weights, value_states)
+
+            if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+                raise ValueError(
+                    f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                    f" {attn_output.size()}"
+                )
+
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+            if self.config.pretraining_tp > 1:
+                attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
+                o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
+                attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+            else:
+                attn_output = self.o_proj(attn_output)
+
+            if not output_attentions:
+                attn_weights = None
+
+            return attn_output, attn_weights, past_key_value
+
+else:
+    LlamaQGFDAttention = None
+
+
+def patch_llama_with_qgfd(
+    model: nn.Module,
+    diffusion_steps: int = 4,
+    target_alpha: float = 0.02,
+    warmup_steps: int = 20000,
+    verbose: bool = True,
+    **qgfd_kwargs,
+) -> nn.Module:
+    """
+    In-place replace all LlamaAttention layers in a model with LlamaQGFDAttention.
+    Reuses existing q_proj, k_proj, v_proj, o_proj, and rotary_emb submodules so that
+    LoRA/QLoRA adapters and original projection weights remain fully intact.
+    """
+    if not HAS_LLAMA:
+        raise RuntimeError("Hugging Face transformers (LlamaAttention) is not installed.")
+
+    replaced_count = 0
+    for name, module in list(model.named_modules()):
+        if isinstance(module, LlamaAttention) and not isinstance(module, LlamaQGFDAttention):
+            layer_idx = getattr(module, "layer_idx", None)
+            param_sample = next(module.parameters(), None)
+            device = param_sample.device if param_sample is not None else torch.device("cpu")
+            dtype = param_sample.dtype if param_sample is not None else torch.float32
+
+            new_attn = LlamaQGFDAttention(
+                config=module.config,
+                layer_idx=layer_idx,
+                diffusion_steps=diffusion_steps,
+                target_alpha=target_alpha,
+                warmup_steps=warmup_steps,
+                **qgfd_kwargs,
+            ).to(device=device, dtype=dtype)
+
+            # Reuse original modules (preserves LoRA / QLoRA adapters & weight references!)
+            new_attn.q_proj = module.q_proj
+            new_attn.k_proj = module.k_proj
+            new_attn.v_proj = module.v_proj
+            new_attn.o_proj = module.o_proj
+            if hasattr(module, "rotary_emb"):
+                new_attn.rotary_emb = module.rotary_emb
+
+            parent_name, _, child_name = name.rpartition(".")
+            if parent_name:
+                parent = model.get_submodule(parent_name)
+            else:
+                parent = model
+            setattr(parent, child_name, new_attn)
+            replaced_count += 1
+
+    if verbose:
+        print(f"[QGFD Patch] Successfully replaced {replaced_count} LlamaAttention layers with LlamaQGFDAttention.")
+    return model

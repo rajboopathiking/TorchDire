@@ -8,8 +8,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import transformers  # for version info
 
-from .qgfd_attention import MultiHeadQGFDLayer
-from .universal_qgfd_replacer import wrap_model_with_qgfd
+from qgfd_attention import MultiHeadQGFDLayer
+from universal_qgfd_replacer import wrap_model_with_qgfd
 
 # ============================================================
 # CONFIG
