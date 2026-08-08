@@ -21,6 +21,27 @@ except ImportError:
 from torchdire.nn.qgfd_kernel import QGFDKernel
 
 
+_LLAMA_ATTN_RETURNS_2_TUPLE = False
+if HAS_LLAMA:
+    try:
+        import transformers
+        v_parts = [int(p) for p in transformers.__version__.split(".")[:2] if p.isdigit()]
+        if len(v_parts) >= 2 and tuple(v_parts) >= (4, 43):
+            _LLAMA_ATTN_RETURNS_2_TUPLE = True
+        else:
+            import inspect
+            from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+            decoder_src = inspect.getsource(LlamaDecoderLayer.forward)
+            if "hidden_states, _ =" in decoder_src or "hidden_states, self_attn_weights =" in decoder_src:
+                _LLAMA_ATTN_RETURNS_2_TUPLE = True
+            else:
+                attn_src = inspect.getsource(LlamaAttention.forward)
+                if "return attn_output, attn_weights\n" in attn_src or "return attn_output, attn_weights\r\n" in attn_src:
+                    _LLAMA_ATTN_RETURNS_2_TUPLE = True
+    except Exception:
+        pass
+
+
 if HAS_LLAMA:
     class LlamaQGFDAttention(LlamaAttention):
         """
@@ -207,7 +228,10 @@ if HAS_LLAMA:
             if not output_attentions:
                 attn_weights = None
 
-            return attn_output, attn_weights, past_key_value
+            if _LLAMA_ATTN_RETURNS_2_TUPLE:
+                return attn_output, attn_weights
+            else:
+                return attn_output, attn_weights, past_key_value
 
         def __getattr__(self, name: str):
             try:
