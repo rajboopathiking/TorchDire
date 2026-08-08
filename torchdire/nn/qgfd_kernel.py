@@ -152,7 +152,18 @@ class QGFDKernel(nn.Module):
         p = p0
         prev_p = None
 
-        kernel = self.conv_kernel
+        if not hasattr(self, "conv_kernel") or self.conv_kernel is None:
+            kernel_size = getattr(self, "kernel_size", 5)
+            kernel = torch.ones(kernel_size, dtype=torch.float32)
+            center = kernel_size // 2
+            kernel[center] = 2.0
+            kernel = kernel / kernel.sum()
+            self.register_parameter(
+                "conv_kernel",
+                nn.Parameter(kernel.view(1, 1, kernel_size).to(device=p0.device, dtype=p0.dtype)),
+            )
+
+        kernel = self.conv_kernel.to(device=p0.device, dtype=p0.dtype)
         K_size = kernel.shape[-1]
 
         for _ in range(self.diffusion_steps):
