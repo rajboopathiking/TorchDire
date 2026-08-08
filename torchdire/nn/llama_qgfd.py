@@ -143,7 +143,24 @@ if HAS_LLAMA:
             key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-            cos, sin = self.rotary_emb(value_states, position_ids)
+            position_embeddings = kwargs.get("position_embeddings", None)
+            if position_embeddings is not None:
+                cos, sin = position_embeddings
+            elif hasattr(self, "rotary_emb") and self.rotary_emb is not None:
+                cos, sin = self.rotary_emb(value_states, position_ids)
+            else:
+                if not hasattr(self, "_fallback_rotary_emb"):
+                    head_dim = getattr(self, "head_dim", value_states.shape[-1])
+                    max_pos = getattr(self, "max_position_embeddings", 2048)
+                    base = getattr(self, "rope_theta", 10000.0)
+                    from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+                    self._fallback_rotary_emb = LlamaRotaryEmbedding(
+                        head_dim,
+                        max_position_embeddings=max_pos,
+                        base=base,
+                    ).to(device=value_states.device)
+                cos, sin = self._fallback_rotary_emb(value_states, position_ids)
+
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
             if past_key_value is not None:
@@ -221,8 +238,24 @@ def patch_llama_with_qgfd(
         raise RuntimeError("Hugging Face transformers (LlamaAttention) is not installed.")
 
     replaced_count = 0
+    updated_count = 0
+    model_rotary = getattr(model, "rotary_emb", None)
+    if model_rotary is None and hasattr(model, "model"):
+        model_rotary = getattr(model.model, "rotary_emb", None)
+
     for name, module in list(model.named_modules()):
-        if isinstance(module, LlamaAttention) and not isinstance(module, LlamaQGFDAttention):
+        if isinstance(module, LlamaAttention):
+            if isinstance(module, LlamaQGFDAttention):
+                # Update QGFD parameters if layer is already patched
+                for k, v in qgfd_kwargs.items():
+                    if hasattr(module.qgfd, k):
+                        setattr(module.qgfd, k, v)
+                module.qgfd.diffusion_steps = diffusion_steps
+                module.qgfd.target_alpha = target_alpha
+                module.qgfd.warmup_steps = warmup_steps
+                updated_count += 1
+                continue
+
             layer_idx = getattr(module, "layer_idx", None)
             param_sample = next(module.parameters(), None)
             device = param_sample.device if param_sample is not None else torch.device("cpu")
@@ -260,6 +293,8 @@ def patch_llama_with_qgfd(
             new_attn.o_proj = module.o_proj
             if hasattr(module, "rotary_emb"):
                 new_attn.rotary_emb = module.rotary_emb
+            elif model_rotary is not None:
+                new_attn.rotary_emb = model_rotary
 
             parent_name, _, child_name = name.rpartition(".")
             if parent_name:
@@ -270,5 +305,8 @@ def patch_llama_with_qgfd(
             replaced_count += 1
 
     if verbose:
-        print(f"[QGFD Patch] Successfully replaced {replaced_count} LlamaAttention layers with LlamaQGFDAttention.")
+        if replaced_count > 0:
+            print(f"[QGFD Patch] Successfully replaced {replaced_count} LlamaAttention layers with LlamaQGFDAttention.")
+        elif updated_count > 0:
+            print(f"[QGFD Patch] Model was already patched; updated parameters for {updated_count} LlamaQGFDAttention layers.")
     return model

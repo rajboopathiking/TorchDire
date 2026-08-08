@@ -99,10 +99,36 @@ def test_llama_qgfd_attribute_preservation():
     assert hasattr(attn_layer, "vocab_size") and attn_layer.vocab_size == 100  # From config fallback __getattr__
 
 
+def test_llama_qgfd_rotary_fallback_and_double_patch():
+    config = LlamaConfig(
+        vocab_size=100,
+        hidden_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=1,
+        intermediate_size=128,
+        max_position_embeddings=128,
+    )
+    model = LlamaForCausalLM(config)
+    # Remove rotary_emb from attention layer to simulate newer transformers / custom architecture
+    if hasattr(model.model.layers[0].self_attn, "rotary_emb"):
+        delattr(model.model.layers[0].self_attn, "rotary_emb")
+
+    patch_llama_with_qgfd(model, diffusion_steps=2, target_alpha=0.02, warmup_steps=0, verbose=False)
+    # Patch second time (double-patching safety test)
+    patch_llama_with_qgfd(model, diffusion_steps=3, target_alpha=0.03, warmup_steps=0, verbose=False)
+
+    x = torch.randn(2, 16, 64)
+    out, _, _ = model.model.layers[0].self_attn(x)
+    assert out.shape == (2, 16, 64)
+    assert not torch.isnan(out).any()
+
+
 if __name__ == "__main__":
     test_qgfd_kernel_standalone()
     test_qgfd_kernel_gqa()
     test_llama_qgfd_attention_forward()
     test_patch_llama_model()
     test_llama_qgfd_attribute_preservation()
+    test_llama_qgfd_rotary_fallback_and_double_patch()
     print("All Llama QGFD tests passed successfully!")
