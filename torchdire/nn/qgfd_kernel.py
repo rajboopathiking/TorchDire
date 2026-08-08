@@ -120,10 +120,21 @@ class QGFDKernel(nn.Module):
         sim = sim / max(1.0, math.sqrt(head_dim))
         sim = sim / self.temp
 
+        if Lk > 1:
+            min_val = torch.finfo(K.dtype).min
+            causal_mask = torch.triu(torch.full((Lk, Lk), min_val, device=K.device, dtype=K.dtype), diagonal=1).view(1, 1, Lk, Lk)
+            sim = sim + causal_mask
+
         P = F.softmax(sim, dim=-1)
 
         jitter = self._eps(P)
         P = P * (1.0 - jitter) + (jitter / P.size(-1))
+
+        if Lk > 1:
+            valid_p = torch.tril(torch.ones((Lk, Lk), device=K.device, dtype=torch.bool)).view(1, 1, Lk, Lk)
+            P = P * valid_p.to(P.dtype)
+            Z = P.sum(dim=-1, keepdim=True).clamp(min=self._eps(P))
+            P = P / Z
 
         if self.detach_P:
             P = P.detach()
