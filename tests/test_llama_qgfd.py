@@ -77,9 +77,32 @@ def test_patch_llama_model():
     assert not torch.isnan(orig_q_proj.weight.grad).any()
 
 
+def test_llama_qgfd_attribute_preservation():
+    config = LlamaConfig(
+        vocab_size=100,
+        hidden_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=1,
+        intermediate_size=128,
+        max_position_embeddings=128,
+    )
+    model = LlamaForCausalLM(config)
+    patch_llama_with_qgfd(model, diffusion_steps=2, target_alpha=0.02, warmup_steps=0, verbose=False)
+    
+    attn_layer = model.model.layers[0].self_attn
+    assert isinstance(attn_layer, LlamaQGFDAttention)
+    assert hasattr(attn_layer, "num_heads") and attn_layer.num_heads == 4
+    assert hasattr(attn_layer, "num_key_value_heads") and attn_layer.num_key_value_heads == 2
+    assert hasattr(attn_layer, "head_dim") and attn_layer.head_dim == 16
+    assert hasattr(attn_layer, "num_key_value_groups") and attn_layer.num_key_value_groups == 2
+    assert hasattr(attn_layer, "vocab_size") and attn_layer.vocab_size == 100  # From config fallback __getattr__
+
+
 if __name__ == "__main__":
     test_qgfd_kernel_standalone()
     test_qgfd_kernel_gqa()
     test_llama_qgfd_attention_forward()
     test_patch_llama_model()
+    test_llama_qgfd_attribute_preservation()
     print("All Llama QGFD tests passed successfully!")

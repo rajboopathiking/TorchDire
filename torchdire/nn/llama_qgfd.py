@@ -52,6 +52,37 @@ if HAS_LLAMA:
             **kwargs,
         ):
             super().__init__(config, layer_idx=layer_idx)
+
+            # Ensure essential LLaMA attention attributes exist regardless of transformers version or custom config
+            num_heads = (
+                getattr(config, "num_attention_heads", None)
+                or getattr(config, "num_heads", None)
+                or getattr(config, "n_head", None)
+                or getattr(self, "num_heads", None)
+            )
+            num_key_value_heads = (
+                getattr(config, "num_key_value_heads", None)
+                or getattr(config, "num_kv_heads", None)
+                or getattr(self, "num_key_value_heads", None)
+                or num_heads
+            )
+            hidden_size = getattr(config, "hidden_size", getattr(self, "hidden_size", None))
+            head_dim = (
+                getattr(config, "head_dim", None)
+                or getattr(self, "head_dim", None)
+                or (hidden_size // num_heads if hidden_size and num_heads else None)
+            )
+            num_key_value_groups = (
+                getattr(self, "num_key_value_groups", None)
+                or (num_heads // num_key_value_heads if num_heads and num_key_value_heads else 1)
+            )
+
+            self.num_heads = num_heads
+            self.num_key_value_heads = num_key_value_heads
+            self.hidden_size = hidden_size
+            self.head_dim = head_dim
+            self.num_key_value_groups = num_key_value_groups
+
             self.qgfd = QGFDKernel(
                 diffusion_steps=diffusion_steps,
                 target_alpha=target_alpha,
@@ -68,7 +99,7 @@ if HAS_LLAMA:
                 mask_threshold=mask_threshold,
                 debug=debug,
                 learnable_alpha=learnable_alpha,
-                num_heads=config.num_attention_heads,
+                num_heads=self.num_heads,
                 **kwargs,
             )
 
@@ -161,6 +192,14 @@ if HAS_LLAMA:
 
             return attn_output, attn_weights, past_key_value
 
+        def __getattr__(self, name: str):
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                if "config" in self.__dict__ and hasattr(self.__dict__["config"], name):
+                    return getattr(self.__dict__["config"], name)
+                raise
+
 else:
     LlamaQGFDAttention = None
 
@@ -197,6 +236,22 @@ def patch_llama_with_qgfd(
                 warmup_steps=warmup_steps,
                 **qgfd_kwargs,
             ).to(device=device, dtype=dtype)
+
+            # Copy all original layer attributes to preserve model-specific config or transformers overrides
+            for attr in [
+                "num_heads",
+                "num_key_value_heads",
+                "head_dim",
+                "num_key_value_groups",
+                "hidden_size",
+                "max_position_embeddings",
+                "rope_theta",
+                "attention_dropout",
+                "is_causal",
+                "layer_idx",
+            ]:
+                if hasattr(module, attr):
+                    setattr(new_attn, attr, getattr(module, attr))
 
             # Reuse original modules (preserves LoRA / QLoRA adapters & weight references!)
             new_attn.q_proj = module.q_proj
