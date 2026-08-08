@@ -259,7 +259,7 @@ def patch_llama_with_qgfd(
     model: nn.Module,
     diffusion_steps: int = 4,
     target_alpha: float = 0.02,
-    warmup_steps: int = 20000,
+    warmup_steps: int = 0,
     verbose: bool = True,
     **qgfd_kwargs,
 ) -> nn.Module:
