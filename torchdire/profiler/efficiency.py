@@ -23,6 +23,11 @@ class QGFDProfiler:
         mode: str = "full",
         num_runs: int = 20,
     ) -> dict[str, float]:
+        if embed_dim % num_heads != 0:
+            for candidate in [8, 4, 2, 1]:
+                if embed_dim % candidate == 0:
+                    num_heads = candidate
+                    break
 
         x = torch.randn(batch_size, seq_len, embed_dim, device=self.device)
 

@@ -106,6 +106,7 @@ def fused_conv_diffusion(
     else:
         # Fallback PyTorch implementation
         p = p0
+        kernel = kernel.to(dtype=p0.dtype)
         K = kernel.shape[-1]
         for _ in range(steps):
             x = p.view(B * H * Lq, 1, Lk)

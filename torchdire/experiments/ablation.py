@@ -68,7 +68,7 @@ class QGFDAblator:
         self.device = torch.device(device)
 
     def run(self, save_csv_path: str | None = None) -> list[dict]:
-        dataset = TextSummarizationDataset(num_samples=100, src_len=32, tgt_len=16, seed=42)
+        dataset = TextSummarizationDataset(num_samples=100, src_len=32, tgt_len=32, seed=42)
         dataloader = DataLoader(dataset, batch_size=16, shuffle=False)
 
         results = []
