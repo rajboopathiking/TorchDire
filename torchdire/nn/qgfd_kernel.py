@@ -150,14 +150,18 @@ class QGFDKernel(nn.Module):
             x_conv = F.conv1d(x_padded, kernel, groups=1)
             p_conv = x_conv.view(B, H, Lq, Lk)
 
+            p_conv = p_conv.clamp(min=self._eps(p_conv))
             if valid_mask is not None:
                 p_conv = p_conv * valid_mask.to(p_conv.dtype)
 
-            p_conv = p_conv.clamp(min=self._eps(p_conv))
             Z = p_conv.sum(dim=-1, keepdim=True).clamp(min=self._eps(p_conv))
             p_conv = p_conv / Z
 
             p_next = (1.0 - alpha_eff) * p0 + alpha_eff * p_conv
+            if valid_mask is not None:
+                p_next = p_next * valid_mask.to(p_next.dtype)
+                Z = p_next.sum(dim=-1, keepdim=True).clamp(min=self._eps(p_next))
+                p_next = p_next / Z
 
             if prev_p is not None and torch.max(torch.abs(p_next - prev_p)) < self.early_stop_eps:
                 p = p_next
@@ -184,7 +188,7 @@ class QGFDKernel(nn.Module):
         return scores + additive
 
     def _build_valid_mask(self, scores: torch.Tensor, p0: torch.Tensor) -> Optional[torch.Tensor]:
-        mask = (scores > self.mask_threshold) & (p0 > 1e-10)
+        mask = (scores > self.mask_threshold) & (p0 > 1e-12)
         if mask.all():
             return None
         return mask

@@ -1,5 +1,6 @@
 import torch
 from torchdire.nn.qgfd import MultiHeadQGFDLayer
+from torchdire.nn.qgfd_kernel import QGFDKernel
 from torchdire.nn.gating import QGFDMultiHeadAttention
 
 
@@ -110,6 +111,24 @@ def test_sequence_length_fallbacks():
     assert not torch.isnan(out_dis).any()
 
 
+def test_causal_masking_strictness():
+    B, H, Lq, Lk = 1, 4, 10, 10
+    scores = torch.randn(B, H, Lq, Lk)
+    causal_mask = torch.triu(torch.full((Lq, Lk), -1e9), diagonal=1).view(1, 1, Lq, Lk)
+    scores_masked = scores + causal_mask
+    keys = torch.randn(B, H, Lk, 16)
+
+    for mode in ["full", "conv"]:
+        kernel = QGFDKernel(diffusion_steps=2, target_alpha=0.05, mode=mode, kernel_size=5, warmup_steps=0)
+        p = kernel(scores_masked, keys)
+
+        # Verify that all causally masked positions (k > q) remain STRICTLY 0.0
+        causal_upper_tri = torch.triu(torch.ones(Lq, Lk, dtype=torch.bool), diagonal=1).view(1, 1, Lq, Lk).expand(B, H, Lq, Lk)
+        masked_probs = p[causal_upper_tri]
+        assert (masked_probs == 0.0).all(), f"Causal mask leakage detected in QGFD mode={mode}!"
+        assert torch.allclose(p.sum(dim=-1), torch.ones_like(p.sum(dim=-1)), atol=1e-5)
+
+
 if __name__ == "__main__":
     test_qgfd_full_mode()
     test_qgfd_conv_mode()
@@ -120,5 +139,6 @@ if __name__ == "__main__":
     test_autograd_gradient_flow()
     test_edge_case_inputs()
     test_sequence_length_fallbacks()
+    test_causal_masking_strictness()
     print("All QGFD layer correctness and stability unit tests passed successfully!")
 
