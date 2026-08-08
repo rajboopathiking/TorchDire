@@ -194,7 +194,17 @@ if HAS_LLAMA:
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
             if attention_mask is not None:
-                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+                if attention_mask.dim() == 2:
+                    causal_mask = (1.0 - attention_mask[:, None, None, : key_states.shape[-2]].to(query_states.dtype)) * torch.finfo(query_states.dtype).min
+                else:
+                    causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+                scores = attn_weights + causal_mask
+            elif q_len > 1:
+                min_dtype = torch.finfo(query_states.dtype).min
+                causal_mask = torch.full(
+                    (q_len, key_states.shape[-2]), fill_value=min_dtype, device=query_states.device, dtype=query_states.dtype
+                )
+                causal_mask = torch.triu(causal_mask, diagonal=1 + key_states.shape[-2] - q_len).view(1, 1, q_len, key_states.shape[-2])
                 scores = attn_weights + causal_mask
             else:
                 scores = attn_weights
