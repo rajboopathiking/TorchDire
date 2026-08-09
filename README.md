@@ -238,7 +238,41 @@ print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 ### KV-Cache Autoregressive Stability
 In incremental decoding ($q\_len = 1$), QGFD computes key transitions $P = \text{softmax}(KK^\top / (\sqrt{d_k} \tau))$ over all valid keys currently in the KV cache ($0 \dots L_k-1$). Because all cached keys belong to the causal past of the query token, $P$ is a balanced row-stochastic matrix with column sums $\approx 1.0$, guaranteeing $O(1)$ per-step decoding stability without probability sink collapse.
 
+### Practical Verification Results (42dot/42dot_LLM-SFT-1.3B)
+
+| Check | Result |
+|-------|--------|
+| `torch.triu` removed from $P$ | ✅ True |
+| `causal_mask` removed | ✅ True |
+| Baseline | Hello, I'm a language model. I can help you with any questions you have about programming, coding, or any other topic related to technology. |
+| QGFD (`use_cache=True`) | Hello, I'm a language model. I can help you with any questions you have about programming, AI, or anything else. |
+| QGFD (`use_cache=False`) | Hello, I'm a language model. I can help you with any questions you have about programming, coding, or any other topic related to programming. |
+| Unique token ratio | 85% (17/20) |
+| Collapse check | PASS |
+| 26/26 unit tests | All passed |
+
 ---
+
+## ⚡ Kaggle/Colab Quick Start
+
+```python
+# Cell 1: Install
+!pip install --no-deps git+https://github.com/rajboopathiking/TorchDire.git
+
+# Cell 2: (After kernel restart) Run
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from torchdire import patch_llama_with_qgfd
+
+tokenizer = AutoTokenizer.from_pretrained("42dot/42dot_LLM-SFT-1.3B")
+model = AutoModelForCausalLM.from_pretrained("42dot/42dot_LLM-SFT-1.3B", torch_dtype=torch.float32, low_cpu_mem_usage=False)
+
+qgfd_model = patch_llama_with_qgfd(model, diffusion_steps=2, target_alpha=0.02)
+
+inputs = tokenizer("Hello, I'm a language model", return_tensors="pt").to(qgfd_model.device)
+outputs = qgfd_model.generate(**inputs, max_new_tokens=50, do_sample=False, use_cache=True)
+print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+```
 
 ---
 

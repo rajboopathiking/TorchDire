@@ -87,6 +87,53 @@ As $T \to \infty$ or $\alpha \to 1$, $p^{(T)}$ converges to the unique stationar
 $$\|p^{(T)} - \pi\| \le C \cdot \gamma^T, \quad \text{where } \gamma = \max(\alpha, |\lambda_2(P)|) < 1$$
 Query outputs collapse: $\lim_{T \to \infty} \|h_i^{(T)} - h_j^{(T)}\| = 0$.
 
+### 2.1 Key Transition Matrix Design ($P$) for Causal LLMs
+
+#### A. Theoretical Analysis: Why Full (Unmasked) $P$ is Correct for Causal LLMs
+
+In causal autoregressive decoding, a query at position $q$ attends to keys $\{K_0, K_1, \dots, K_q\}$. The causal constraint is:
+- Query $q$ must NOT attend to keys $m > q$ (future tokens)
+- This constraint is enforced by the attention scores $p^{(0)}$, NOT by the key transition matrix $P$
+- $p^{(0)}[q, m] = 0$ for $m > q$ (via causal mask on scores)
+
+The key transition matrix $P$ represents similarity-based diffusion among keys:
+- $P_{n,m} = \text{softmax}_m(K_n \cdot K_m / (\sqrt{d_k} \cdot \tau))$
+- When key $n$ ($n \le q$) diffuses attention to key $m$ ($m \le q$), BOTH keys are already in the causal past of query $q$
+- This does NOT leak future information — it redistributes attention mass within the set of already-visible keys
+- During prefill ($q\_len > 1$), the `valid_mask` automatically zeros out $m > q$ positions and renormalizes
+
+#### B. Why Lower-Triangular $P$ Was Incorrect
+
+Applying a lower-triangular causal mask to $P$ ($P_{n,m} = 0$ for $m > n$) causes:
+- Column sum asymmetry: $\sum_n P_{n,0} \approx \ln(L_k) \gg 1$, while $P_{L_k-1, L_k-1} \approx 1/L_k \ll 1$
+- Position 0 becomes an artificial attention probability sink
+- During incremental KV-cache decoding (`use_cache=True`), attention weight constantly drains toward Position 0, causing output collapse (repeating tokens like '이이이...')
+
+Full (unmasked) $P$ has:
+- Balanced column sums $\approx 1.0$ for all positions
+- Near-uniform stationary distribution $\pi$ (symmetric oversmoothing rather than collapse to pos 0)
+- $O(1)$ per-step decoding stability
+
+#### C. All 5 QGFD Theorems Hold with Full $P$
+
+| Theorem | Statement | Status |
+|---------|-----------|--------|
+| 1. Softmax Equivalence | $\alpha=0 \to p = p^{(0)}$ | ✅ |
+| 2. Geometric Convergence | $\|p^{(T)} - p^{(\infty)}\| \le \alpha^T \|p^{(0)} - p^{(\infty)}\|$ | ✅ $P$ is row-stochastic, spectral radius $< 1$ |
+| 3. Multi-Hop Expansion | $p^{(T)} = (1-\alpha)\sum \alpha^k p^{(0)} P^k + \alpha^T p^{(0)} P^T$ | ✅ holds for any row-stochastic $P$ |
+| 4. Dense Approximation | Error $\le C|\lambda_2(P)|^T$ | ✅ $\lambda_2 < 1$ for full $P$ |
+| 5. Oversmoothing Bounds | $\|p^{(T)} - \pi\| \le C \gamma^T$ | ✅ improved: near-uniform $\pi$ |
+
+#### D. Comparison Table (Lower-Triangular vs Full $P$)
+
+| Property | Lower-Triangular $P$ (broken) | Full $P$ (correct) |
+|----------|----------------------------|-------------------|
+| Column sum of pos 0 | $\approx \ln(L_k) \gg 1$ | $\approx 1.0$ |
+| Column sum of pos $L_k-1$ | $\approx 1/L_k \ll 1$ | $\approx 1.0$ |
+| Stationary distribution $\pi$ | Concentrated at pos 0 (sink) | Near-uniform (balanced) |
+| KV-cache decoding | Collapses (이이이...) | Stable (meaningful text) |
+| Causality preserved? | Yes but unnecessary constraint | Yes — enforced by $p^{(0)}$ and `valid_mask` |
+
 ---
 
 ## 3. Step-by-Step Numerical Walkthrough

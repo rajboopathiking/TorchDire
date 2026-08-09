@@ -51,6 +51,11 @@ $$p^{(T)} = (1 - \alpha) \sum_{k=0}^{T-1} \alpha^k p^{(0)} P^k + \alpha^T p^{(0)
 $$\|p^{(T)} - \pi\| \le C \gamma^T, \quad \text{where } \gamma = \max(\alpha, |\lambda_2(P)|) < 1$$
 Consequently, query output representations collapse: $\lim_{T \to \infty} \|h_i^{(T)} - h_j^{(T)}\| = 0$.
 
+### Causal Key Transition Matrix Design ($P$)
+
+In causal autoregressive decoding, a query $q$ must not attend to future keys. While this causal constraint is rigidly enforced by the initial attention scores $p^{(0)}$, applying a lower-triangular causal mask to the transition matrix $P$ induces severe column sum asymmetry ($\sum_n P_{n,0} \approx \ln(L_k) \gg 1$), creating an artificial probability sink at Position 0.
+By recognizing that all cached keys $\{K_0, \dots, K_q\}$ inherently belong to the causal past, we allow $P$ to remain unmasked across valid keys. This results in balanced column sums ($\approx 1.0$) and a near-uniform stationary distribution, which empirically eliminates generation collapse and ensures $O(1)$ incremental KV-cache decoding stability.
+
 ---
 
 ## III. System Implementation: TorchDire Framework
