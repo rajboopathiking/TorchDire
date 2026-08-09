@@ -208,46 +208,37 @@ attn_output = (p V) projected back to embed_dim
 
 ---
 
-## 🧱 Universal Wrapping: SafeWrappedAttention & wrap_model_with_qgfd
+## 🦙 Specialized LLaMA Patching (`patch_llama_with_qgfd`)
 
-`universal_qgfd_replacer.py` provides:
-
-- **`SafeWrappedAttention`** – wraps an existing attention module:
-  - stores original as `._orig`
-  - creates a `MultiHeadQGFDLayer` as `.qgfd`
-  - copies attributes and transfers weights
-  - preserves caching & HF-compatible forward signature
-
-- **`wrap_model_with_qgfd(model, MultiHeadQGFDLayer, ...)`** – walks the module tree, finds leaf attentions, and replaces them with `SafeWrappedAttention` instances.
-
-### Example:
+For Hugging Face LLaMA architecture models (such as `42dot/42dot_LLM-SFT-1.3B`, `Llama-2`, `Llama-3`, `SmolLM`), `patch_llama_with_qgfd` replaces original `LlamaAttention` layers in-place with `LlamaQGFDAttention`, preserving original RoPE rotary embeddings, GQA/MQA key-value projections, LoRA/QLoRA adapters, and incremental KV cache decoding (`use_cache=True`).
 
 ```python
-from qgfd_attention import MultiHeadQGFDLayer
-from universal_qgfd_replacer import wrap_model_with_qgfd
-from transformers import AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from torchdire import patch_llama_with_qgfd
 
-model = AutoModelForCausalLM.from_pretrained("gpt2")
+model = AutoModelForCausalLM.from_pretrained("42dot/42dot_LLM-SFT-1.3B")
 
-model = wrap_model_with_qgfd(
+# Patch model in-place (defaults to warmup_steps=0 so QGFD is active during inference)
+qgfd_model = patch_llama_with_qgfd(
     model,
-    MultiHeadQGFDLayer,
-    diffusion_steps=1,
-    target_alpha=0.01,
+    diffusion_steps=2,
+    target_alpha=0.02,
     warmup_steps=0,
-    kernel_size=5,
-    early_stop_eps=0.0,
-    mode="full",                # or "conv"
-    enable_qgfd=True,
-    max_alpha=0.05,
-    max_full_seq_len=512,
-    full_fallback_mode="conv",  # fallback to conv for long seq
-    debug=False,
-    verbose=True,
+    mode="full",
 )
+
+tokenizer = AutoTokenizer.from_pretrained("42dot/42dot_LLM-SFT-1.3B")
+inputs = tokenizer("Hello, I'm a language model", return_tensors="pt")
+
+# Runs autoregressively with KV cache (use_cache=True)
+outputs = qgfd_model.generate(**inputs, max_new_tokens=50)
+print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 ```
 
-After wrapping, you use model exactly like before.
+### KV-Cache Autoregressive Stability
+In incremental decoding ($q\_len = 1$), QGFD computes key transitions $P = \text{softmax}(KK^\top / (\sqrt{d_k} \tau))$ over all valid keys currently in the KV cache ($0 \dots L_k-1$). Because all cached keys belong to the causal past of the query token, $P$ is a balanced row-stochastic matrix with column sums $\approx 1.0$, guaranteeing $O(1)$ per-step decoding stability without probability sink collapse.
+
+---
 
 ---
 

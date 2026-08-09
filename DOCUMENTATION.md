@@ -36,9 +36,17 @@ $$p^{(t+1)} = (1 - \alpha) p^{(0)} + \alpha (p^{(t)} P)$$
 $$h^{(T)} = p^{(T)} V$$
 
 - $p^{(0)}$: Baseline softmax attention logits.
-- $P$: Row-stochastic key transition matrix.
+- $P$: Row-stochastic key transition matrix over valid keys in the KV cache.
 - $\alpha$: Diffusion mixing strength ($\alpha \in [0.01, 0.05]$).
 - $T$: Number of diffusion steps ($T \in [1, 4]$).
+
+### Autoregressive KV-Cache & Key Transition Matrix Design ($P$):
+In causal language model decoding (incremental $q\_len = 1$ with KV-cache of length $L_k$), all keys $\{0, 1, \dots, L_k - 1\}$ currently present in the cache represent valid past tokens for the current query step $q = L_k - 1$.
+
+- **Pitfall of Lower-Triangular Masking on $P$:** Applying a lower-triangular causal mask to $P$ ($P_{n, m} = 0$ for $m > n$) causes extreme column sum asymmetry:
+  $$\sum_{n=0}^{L_k-1} P_{n, 0} \approx \ln(L_k) \gg 1, \quad P_{L_k-1, L_k-1} \approx \frac{1}{L_k} \ll 1$$
+  This creates an artificial **attention probability sink** at Position 0, which constantly drains attention weight away from recent tokens and funnels it into Position 0 during incremental decoding (causing output collapse into repeating tokens like `이이이...`).
+- **Balanced Stochastic Formulation:** Since all cached keys $m \le q$ belong to the causal past of query $q$, key transitions among cached keys $\{0, \dots, L_k-1\}$ are unconstrained by future tokens. Constructing $P = \text{softmax}\left(\frac{KK^\top}{\sqrt{d_k} \tau}\right)$ over all cached keys yields a balanced row-stochastic matrix with column sums $\approx 1.0$, completely eliminating probability sinks while preserving $O(1)$ per-step incremental decoding stability.
 
 ---
 
