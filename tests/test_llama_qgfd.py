@@ -124,6 +124,37 @@ def test_llama_qgfd_rotary_fallback_and_double_patch():
     assert not torch.isnan(out).any()
 
 
+def test_llama_qgfd_generation_kv_cache():
+    config = LlamaConfig(
+        vocab_size=100,
+        hidden_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=2,
+        intermediate_size=128,
+        max_position_embeddings=128,
+    )
+    model = LlamaForCausalLM(config)
+    patch_llama_with_qgfd(model, diffusion_steps=2, target_alpha=0.02, warmup_steps=0, verbose=False)
+
+    input_ids = torch.randint(0, 100, (1, 8))
+
+    # Test generation with KV cache (use_cache=True)
+    out_cache = model.generate(input_ids, max_new_tokens=20, do_sample=False, use_cache=True)
+    assert out_cache.shape == (1, 28)
+    assert not torch.isnan(out_cache.float()).any()
+
+    # Test generation without KV cache (use_cache=False)
+    out_nocache = model.generate(input_ids, max_new_tokens=20, do_sample=False, use_cache=False)
+    assert out_nocache.shape == (1, 28)
+    assert not torch.isnan(out_nocache.float()).any()
+
+    # Verify diversity (no single-token collapse attractor loop)
+    generated_tokens = out_cache[0, 8:].tolist()
+    unique_tokens = set(generated_tokens)
+    assert len(unique_tokens) > 1, f"Generation collapsed into a single repeating token: {generated_tokens}"
+
+
 if __name__ == "__main__":
     test_qgfd_kernel_standalone()
     test_qgfd_kernel_gqa()
@@ -131,4 +162,6 @@ if __name__ == "__main__":
     test_patch_llama_model()
     test_llama_qgfd_attribute_preservation()
     test_llama_qgfd_rotary_fallback_and_double_patch()
+    test_llama_qgfd_generation_kv_cache()
     print("All Llama QGFD tests passed successfully!")
+
