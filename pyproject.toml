@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchdire"
-version = "1.0.0"
+version = "1.0.1"
 description = "Query-Graph Flow Diffusion (QGFD) Ecosystem for PyTorch"
 readme = "README.md"
 authors = [{ name = "Raj Boopathi" }]
