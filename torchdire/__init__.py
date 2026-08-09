@@ -12,6 +12,7 @@ from torchdire.utils.replacer import SafeWrappedAttention, wrap_model_with_qgfd
 from torchdire.theory.verifier import verify_qgfd_theorems, QGFDTheoremVerifier
 from torchdire.profiler.efficiency import profile_qgfd_efficiency, QGFDProfiler
 from torchdire.experiments.ablation import QGFDAblator, run_ablation_study
+from torchdire.benchmarks.tradeoff import compare_qgfd_vs_softmax, run_single_benchmark
 
 __version__ = "1.0.0"
 __author__ = "Raj Boopathi"
@@ -30,4 +31,7 @@ __all__ = [
     "QGFDProfiler",
     "QGFDAblator",
     "run_ablation_study",
+    "compare_qgfd_vs_softmax",
+    "run_single_benchmark",
 ]
+

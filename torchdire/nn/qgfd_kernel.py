@@ -122,6 +122,13 @@ class QGFDKernel(nn.Module):
 
         P = F.softmax(sim, dim=-1)
 
+        # Isolate Position 0 (BOS / Attention Sink): Position 0 only transitions to itself
+        # This prevents the LLM's attention sink weight at Pos 0 (often 80%+) from polluting semantic key diffusion
+        if Lk > 1:
+            P_row0 = torch.zeros_like(P[:, :, :1, :])
+            P_row0 = P_row0.masked_fill(torch.tensor([[[[True] + [False] * (Lk - 1)]]], device=P.device), 1.0)
+            P = torch.cat([P_row0, P[:, :, 1:, :]], dim=2)
+
         jitter = self._eps(P)
         P = P * (1.0 - jitter) + (jitter / P.size(-1))
 
