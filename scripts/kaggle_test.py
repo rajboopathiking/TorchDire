@@ -14,9 +14,9 @@ subprocess.check_call([sys.executable, "-m", "pip", "install",
 import inspect
 from torchdire.nn.qgfd_kernel import QGFDKernel
 src = inspect.getsource(QGFDKernel.build_transition_from_keys)
-assert "torch.triu" in src and "causal_mask" in src, \
-    f"ERROR: Old code without causal fix is installed!\nSource:\n{src[:300]}"
-print("[OK] Verified: build_transition_from_keys has causal mask fix")
+assert "torch.triu" not in src and "causal_mask" not in src, \
+    f"ERROR: Old code with lower-triangular causal_mask in P is installed!\nSource:\n{src[:300]}"
+print("[OK] Verified: build_transition_from_keys has causal mask removed (P is full similarity graph)")
 
 from torchdire.nn.llama_qgfd import patch_llama_with_qgfd
 src2 = inspect.getsource(patch_llama_with_qgfd)

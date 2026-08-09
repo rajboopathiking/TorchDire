@@ -117,21 +117,7 @@ class QGFDKernel(nn.Module):
 
         K_norm = F.normalize(K, p=2, dim=-1, eps=self._eps(K))
         sim = torch.einsum("bhid,bhjd->bhij", K_norm, K_norm)
-        # 1. Causal lower-triangular mask on key-key similarity graph sim
-        # Guarantees key i only transitions to past keys j <= i, matching incremental KV-cache behavior
-        if Lk > 1:
-            min_val = torch.finfo(K.dtype).min
-            causal_mask = torch.triu(torch.full((Lk, Lk), min_val, device=K.device, dtype=K.dtype), diagonal=1).view(1, 1, Lk, Lk)
-            sim = sim + causal_mask
-
         P = F.softmax(sim, dim=-1)
-
-        # 2. Isolate Position 0 (BOS / Attention Sink): Position 0 only transitions to itself
-        # This prevents the LLM's attention sink weight at Pos 0 (often 80%+) from polluting semantic key diffusion
-        if Lk > 1:
-            P_row0 = torch.zeros_like(P[:, :, :1, :])
-            P_row0 = P_row0.masked_fill(torch.tensor([[[[True] + [False] * (Lk - 1)]]], device=P.device), 1.0)
-            P = torch.cat([P_row0, P[:, :, 1:, :]], dim=2)
 
         jitter = self._eps(P)
         P = P * (1.0 - jitter) + (jitter / P.size(-1))
