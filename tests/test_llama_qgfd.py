@@ -140,12 +140,12 @@ def test_llama_qgfd_generation_kv_cache():
     input_ids = torch.randint(0, 100, (1, 8))
 
     # Test generation with KV cache (use_cache=True)
-    out_cache = model.generate(input_ids, max_new_tokens=20, do_sample=False, use_cache=True)
+    out_cache = model.generate(input_ids, max_new_tokens=20, min_new_tokens=20, do_sample=False, use_cache=True)
     assert out_cache.shape == (1, 28)
     assert not torch.isnan(out_cache.float()).any()
 
     # Test generation without KV cache (use_cache=False)
-    out_nocache = model.generate(input_ids, max_new_tokens=20, do_sample=False, use_cache=False)
+    out_nocache = model.generate(input_ids, max_new_tokens=20, min_new_tokens=20, do_sample=False, use_cache=False)
     assert out_nocache.shape == (1, 28)
     assert not torch.isnan(out_nocache.float()).any()
 
@@ -153,6 +153,32 @@ def test_llama_qgfd_generation_kv_cache():
     generated_tokens = out_cache[0, 8:].tolist()
     unique_tokens = set(generated_tokens)
     assert len(unique_tokens) > 1, f"Generation collapsed into a single repeating token: {generated_tokens}"
+
+
+def test_llama_softmax_equivalence():
+    config = LlamaConfig(
+        vocab_size=100,
+        hidden_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=2,
+        intermediate_size=128,
+        max_position_embeddings=128,
+    )
+    baseline = LlamaForCausalLM(config)
+    qgfd = LlamaForCausalLM(config)
+    qgfd.load_state_dict(baseline.state_dict())
+
+    patch_llama_with_qgfd(qgfd, diffusion_steps=4, target_alpha=0.0, warmup_steps=0, verbose=False)
+
+    input_ids = torch.randint(0, 100, (2, 16))
+    with torch.no_grad():
+        base_logits = baseline(input_ids).logits
+        qgfd_logits = qgfd(input_ids).logits
+
+    diff = (base_logits - qgfd_logits).abs()
+    assert diff.max().item() < 1e-5, f"Softmax equivalence failed! Max diff: {diff.max().item()}"
+    assert diff.mean().item() < 1e-6, f"Softmax equivalence failed! Mean diff: {diff.mean().item()}"
 
 
 if __name__ == "__main__":
@@ -163,5 +189,7 @@ if __name__ == "__main__":
     test_llama_qgfd_attribute_preservation()
     test_llama_qgfd_rotary_fallback_and_double_patch()
     test_llama_qgfd_generation_kv_cache()
+    test_llama_softmax_equivalence()
     print("All Llama QGFD tests passed successfully!")
+
 
