@@ -140,7 +140,16 @@ if HAS_LLAMA:
                 if cache_position is not None:
                     position_ids = cache_position.unsqueeze(0)
                 else:
-                    position_ids = torch.arange(0, q_len, device=hidden_states.device).unsqueeze(0)
+                    past_len = 0
+                    if past_key_value is not None:
+                        if hasattr(past_key_value, "get_seq_length"):
+                            try:
+                                past_len = past_key_value.get_seq_length(self.layer_idx)
+                            except TypeError:
+                                past_len = past_key_value.get_seq_length()
+                        elif isinstance(past_key_value, (tuple, list)) and len(past_key_value) > 0:
+                            past_len = past_key_value[0].shape[-2]
+                    position_ids = torch.arange(past_len, past_len + q_len, device=hidden_states.device).unsqueeze(0)
 
             if self.config.pretraining_tp > 1:
                 key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
