@@ -324,6 +324,7 @@ def patch_llama_with_qgfd(
                 warmup_steps=warmup_steps,
                 **qgfd_kwargs,
             ).to(device=device, dtype=dtype)
+            new_attn.train(module.training)
 
             # Copy all original layer attributes to preserve model-specific config or transformers overrides
             for attr in [

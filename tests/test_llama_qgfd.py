@@ -136,6 +136,7 @@ def test_llama_qgfd_generation_kv_cache():
     )
     model = LlamaForCausalLM(config)
     patch_llama_with_qgfd(model, diffusion_steps=2, target_alpha=0.02, warmup_steps=0, verbose=False)
+    model.eval()
 
     input_ids = torch.randint(0, 100, (1, 8))
 
@@ -173,6 +174,8 @@ def test_llama_softmax_equivalence():
     qgfd.load_state_dict(baseline.state_dict())
 
     patch_llama_with_qgfd(qgfd, diffusion_steps=4, target_alpha=0.0, warmup_steps=0, verbose=False)
+    baseline.eval()
+    qgfd.eval()
 
     input_ids = torch.randint(0, 100, (2, 16))
     with torch.no_grad():
