@@ -234,7 +234,10 @@ if HAS_LLAMA:
                 attention_mask=None,
             ).to(query_states.dtype)
 
-            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            if self.training and self.attention_dropout > 0.0:
+                attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=True)
+                denom = attn_weights.sum(dim=-1, keepdim=True).clamp(min=torch.finfo(attn_weights.dtype).eps)
+                attn_weights = attn_weights / denom
             attn_output = torch.matmul(attn_weights, value_states)
 
             if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):

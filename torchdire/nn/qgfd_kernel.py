@@ -227,6 +227,16 @@ class QGFDKernel(nn.Module):
         Returns:
             attention_probs: (B, H, Lq, Lk)
         """
+        if self.training and not hasattr(self, "_warned_training_mode"):
+            import warnings
+            warnings.warn(
+                "QGFDKernel.forward called with module.training=True. If you're doing "
+                "inference/generation, call model.eval() first — dropout and the alpha "
+                "warmup schedule are both training-mode-dependent.",
+                stacklevel=2,
+            )
+            self._warned_training_mode = True
+
         B, H, Lq, Lk = scores.shape
 
         if attention_mask is not None:
