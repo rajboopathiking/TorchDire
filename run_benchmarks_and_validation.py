@@ -191,6 +191,38 @@ def validate_correctness_and_stability():
     print(f"  -> Fallback 'disable' (L=32 > max=16): {'PASSED' if f2_ok else 'FAILED'}")
     print(f"  -> Status: {'PASSED [OK]' if passed_fallback else 'FAILED [FAIL]'}")
 
+    # -----------------------------------------------------------------
+    # Test 1.7: Incremental Decoding Equivalence (use_cache=True vs False)
+    # -----------------------------------------------------------------
+    print("\n[Test 1.7] Incremental Decoding Equivalence (use_cache=True vs False)...")
+    passed_cache = False
+    try:
+        from transformers.models.llama.modeling_llama import LlamaConfig, LlamaForCausalLM
+        from torchdire.nn.llama_qgfd import patch_llama_with_qgfd
+        
+        config = LlamaConfig(
+            vocab_size=100, hidden_size=64, num_attention_heads=4, num_key_value_heads=2,
+            num_hidden_layers=1, intermediate_size=128, max_position_embeddings=128,
+        )
+        model = LlamaForCausalLM(config)
+        patch_llama_with_qgfd(model, diffusion_steps=2, target_alpha=0.02, warmup_steps=0, verbose=False)
+        
+        input_ids = torch.randint(0, 100, (1, 8))
+        out_cache = model.generate(input_ids, max_new_tokens=10, min_new_tokens=10, do_sample=False, use_cache=True)
+        out_nocache = model.generate(input_ids, max_new_tokens=10, min_new_tokens=10, do_sample=False, use_cache=False)
+        
+        if out_cache.tolist() == out_nocache.tolist():
+            passed_cache = True
+            print("  -> PASSED. Token-for-token generation strictly matches.")
+        else:
+            print("  -> FAILED. Mismatch between cached and non-cached decoding!")
+    except ImportError:
+        print("  -> SKIPPED (Transformers library not found)")
+        passed_cache = True
+    
+    results["Incremental Decoding Equivalence"] = passed_cache
+    print(f"  -> Status: {'PASSED [OK]' if passed_cache else 'FAILED [FAIL]'}")
+
     return results
 
 

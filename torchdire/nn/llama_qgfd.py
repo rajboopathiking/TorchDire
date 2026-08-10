@@ -137,7 +137,10 @@ if HAS_LLAMA:
         ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
             bsz, q_len, _ = hidden_states.size()
             if position_ids is None:
-                position_ids = torch.arange(0, q_len, device=hidden_states.device).unsqueeze(0)
+                if cache_position is not None:
+                    position_ids = cache_position.unsqueeze(0)
+                else:
+                    position_ids = torch.arange(0, q_len, device=hidden_states.device).unsqueeze(0)
 
             if self.config.pretraining_tp > 1:
                 key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp

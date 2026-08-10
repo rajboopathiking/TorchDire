@@ -154,6 +154,9 @@ def test_llama_qgfd_generation_kv_cache():
     unique_tokens = set(generated_tokens)
     assert len(unique_tokens) > 1, f"Generation collapsed into a single repeating token: {generated_tokens}"
 
+    # Verify equivalence of use_cache=True vs use_cache=False
+    assert out_cache.tolist() == out_nocache.tolist(), "Token-for-token generation mismatch between cached and non-cached decoding!"
+
 
 def test_llama_softmax_equivalence():
     config = LlamaConfig(

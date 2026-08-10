@@ -1694,6 +1694,8 @@ Implement QGFD module with flags: α, T, spectral_reg boolean, adaptive_stop_eps
 
 Unit test: α=0,T=1 equals attention (L2 diff < 1e-6).
 
+Unit test: Incremental Decoding Equivalence (use_cache=True vs False) for token-for-token matches.
+
 Small-scale deterministic run: parity/sorting, plot residual decay and accuracy.
 
 LRA-like long sequence test (or large sequence synthetic) for speed/memory.
