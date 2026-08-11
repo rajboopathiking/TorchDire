@@ -88,6 +88,41 @@ class SafeWrappedAttention(nn.Module):
 
         # Transfer projection weights
         with torch.no_grad():
+            if hasattr(orig_mod, "c_attn") and hasattr(orig_mod.c_attn, "weight"):
+                w = orig_mod.c_attn.weight.data
+                b = orig_mod.c_attn.bias.data if getattr(orig_mod.c_attn, "bias", None) is not None else None
+                if w.shape[1] == 3 * embed_dim:
+                    q_w, k_w, v_w = w.chunk(3, dim=1)
+                    self.qgfd.q_proj.weight.copy_(q_w.T)
+                    self.qgfd.k_proj.weight.copy_(k_w.T)
+                    self.qgfd.v_proj.weight.copy_(v_w.T)
+                    if b is not None:
+                        q_b, k_b, v_b = b.chunk(3, dim=0)
+                        self.qgfd.q_proj.bias.copy_(q_b)
+                        self.qgfd.k_proj.bias.copy_(k_b)
+                        self.qgfd.v_proj.bias.copy_(v_b)
+                elif w.shape[0] == 3 * embed_dim:
+                    q_w, k_w, v_w = w.chunk(3, dim=0)
+                    self.qgfd.q_proj.weight.copy_(q_w)
+                    self.qgfd.k_proj.weight.copy_(k_w)
+                    self.qgfd.v_proj.weight.copy_(v_w)
+                    if b is not None:
+                        q_b, k_b, v_b = b.chunk(3, dim=0)
+                        self.qgfd.q_proj.bias.copy_(q_b)
+                        self.qgfd.k_proj.bias.copy_(k_b)
+                        self.qgfd.v_proj.bias.copy_(v_b)
+
+            if hasattr(orig_mod, "c_proj") and hasattr(orig_mod.c_proj, "weight"):
+                w = orig_mod.c_proj.weight.data
+                b = orig_mod.c_proj.bias.data if getattr(orig_mod.c_proj, "bias", None) is not None else None
+                out_w = self.qgfd.out_proj.weight
+                if w.shape == out_w.shape:
+                    out_w.copy_(w)
+                elif w.T.shape == out_w.shape:
+                    out_w.copy_(w.T)
+                if b is not None and getattr(self.qgfd.out_proj, "bias", None) is not None:
+                    self.qgfd.out_proj.bias.copy_(b)
+
             for src_name, dst_name in [
                 ("q", "q_proj"),
                 ("k", "k_proj"),
@@ -120,8 +155,34 @@ class SafeWrappedAttention(nn.Module):
         position_bias: torch.Tensor | None = None,
         past_key_value: tuple | None = None,
         output_attentions: bool = False,
+        layer_past: tuple | None = None,
+        use_cache: bool = False,
         **kwargs,
     ):
+        p_kv = past_key_value if past_key_value is not None else layer_past
+
+        if p_kv is not None and isinstance(p_kv, (list, tuple)) and len(p_kv) == 2:
+            prev_k, prev_v = p_kv
+            k_new = self.qgfd.k_proj(hidden_states).view(hidden_states.shape[0], hidden_states.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
+            v_new = self.qgfd.v_proj(hidden_states).view(hidden_states.shape[0], hidden_states.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
+
+            full_k = torch.cat([prev_k, k_new], dim=2)
+            full_v = torch.cat([prev_v, v_new], dim=2)
+            present = (full_k, full_v)
+
+            Q = self.qgfd.q_proj(hidden_states).view(hidden_states.shape[0], hidden_states.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
+            scores = torch.einsum("bhqd,bhkd->bhqk", Q, full_k) / math.sqrt(self.head_dim)
+
+            p = self.qgfd.kernel(scores=scores, key_states=full_k, attention_mask=attention_mask)
+
+            attn_output_raw = torch.einsum("bhqk,bhkd->bhqd", p, full_v)
+            attn_output_raw = attn_output_raw.transpose(1, 2).contiguous().view(hidden_states.shape[0], hidden_states.shape[1], self.embed_dim)
+            attn_output = self.qgfd.out_proj(attn_output_raw)
+
+            if output_attentions:
+                return attn_output, present, p
+            return attn_output, present
+
         kv_input = key_value_states if key_value_states is not None else hidden_states
 
         attn_out_tuple = self.qgfd(
@@ -133,23 +194,10 @@ class SafeWrappedAttention(nn.Module):
         attn_output = attn_out_tuple[0]
         attn_probs = attn_out_tuple[1] if output_attentions and len(attn_out_tuple) > 1 else None
 
-        present = None
-        if past_key_value is not None:
-            try:
-                k_proj = self.qgfd.k_proj(kv_input).view(kv_input.shape[0], kv_input.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
-                v_proj = self.qgfd.v_proj(kv_input).view(kv_input.shape[0], kv_input.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
-                if isinstance(past_key_value, (list, tuple)) and len(past_key_value) == 2:
-                    prev_k, prev_v = past_key_value
-                    k = torch.cat([prev_k, k_proj], dim=2)
-                    v = torch.cat([prev_v, v_proj], dim=2)
-                    present = (k, v)
-            except Exception:
-                present = None
-
         if output_attentions:
             attn_weights = attn_probs.mean(dim=1) if (attn_probs is not None and attn_probs.dim() == 4) else attn_probs
-            return attn_output, present, attn_weights
-        return attn_output, present
+            return attn_output, None, attn_weights
+        return attn_output, None
 
 
 def _get_attr_or_index(parent, part):
@@ -177,15 +225,15 @@ def is_leaf_attention(mod: nn.Module) -> bool:
         return False
 
     clsname = mod.__class__.__name__.lower()
-    if "attention" not in clsname:
+    if "attention" not in clsname and "attn" not in clsname:
         return False
 
-    for a in ("q", "k", "v", "q_proj", "k_proj", "v_proj"):
+    for a in ("q", "k", "v", "q_proj", "k_proj", "v_proj", "c_attn", "in_proj_weight"):
         if hasattr(mod, a):
             return True
     for n, p in mod.named_parameters(recurse=False):
         ln = n.lower()
-        if any(k in ln for k in ["q", "k", "v"]) and "weight" in ln:
+        if any(k in ln for k in ["q", "k", "v", "c_attn"]) and "weight" in ln:
             return True
     return False
 
