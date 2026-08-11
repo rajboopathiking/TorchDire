@@ -213,9 +213,22 @@ if HAS_LLAMA:
 
             if attention_mask is not None:
                 if attention_mask.dim() == 2:
-                    causal_mask = (1.0 - attention_mask[:, None, None, : key_states.shape[-2]].to(query_states.dtype)) * torch.finfo(query_states.dtype).min
+                    if (attention_mask < 0).any():
+                        causal_mask = attention_mask[:, None, None, :]
+                    else:
+                        min_dtype = torch.finfo(query_states.dtype).min
+                        causal_mask = (1.0 - attention_mask[:, None, None, :].to(query_states.dtype)) * min_dtype
                 else:
-                    causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+                    causal_mask = attention_mask
+
+                Lk = key_states.shape[-2]
+                if causal_mask.shape[-1] < Lk:
+                    pad_len = Lk - causal_mask.shape[-1]
+                    pad = torch.zeros((*causal_mask.shape[:-1], pad_len), device=causal_mask.device, dtype=causal_mask.dtype)
+                    causal_mask = torch.cat([causal_mask, pad], dim=-1)
+                elif causal_mask.shape[-1] > Lk:
+                    causal_mask = causal_mask[..., :Lk]
+
                 scores = attn_weights + causal_mask
             elif q_len > 1:
                 min_dtype = torch.finfo(query_states.dtype).min
@@ -282,6 +295,7 @@ def patch_llama_with_qgfd(
     target_alpha: float = 0.02,
     warmup_steps: int = 0,
     verbose: bool = True,
+    auto_eval: bool = True,
     **qgfd_kwargs,
 ) -> nn.Module:
     """
@@ -291,6 +305,11 @@ def patch_llama_with_qgfd(
     """
     if not HAS_LLAMA:
         raise RuntimeError("Hugging Face transformers (LlamaAttention) is not installed.")
+
+    if auto_eval and model.training:
+        model.eval()
+        if verbose:
+            print("[QGFD Patch] Switched model to evaluation mode (model.eval()).")
 
     replaced_count = 0
     updated_count = 0

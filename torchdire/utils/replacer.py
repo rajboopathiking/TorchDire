@@ -199,6 +199,7 @@ def wrap_model_with_qgfd(
     kernel_size: int = 5,
     early_stop_eps: float = 0.0,
     verbose: bool = True,
+    auto_eval: bool = True,
     **qgfd_kwargs,
 ) -> nn.Module:
     """
@@ -207,6 +208,11 @@ def wrap_model_with_qgfd(
     For other architectures, uses SafeWrappedAttention.
     """
     gc.collect()
+
+    if auto_eval and model.training:
+        model.eval()
+        if verbose:
+            print("[QGFD Replacer] Switched model to evaluation mode (model.eval()).")
 
     # Check if model contains LlamaAttention
     has_llama_layers = False
@@ -227,6 +233,7 @@ def wrap_model_with_qgfd(
             kernel_size=kernel_size,
             early_stop_eps=early_stop_eps,
             verbose=verbose,
+            auto_eval=auto_eval,
             **qgfd_kwargs,
         )
 
