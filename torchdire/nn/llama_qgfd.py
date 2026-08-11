@@ -306,6 +306,9 @@ def patch_llama_with_qgfd(
     if not HAS_LLAMA:
         raise RuntimeError("Hugging Face transformers (LlamaAttention) is not installed.")
 
+    if hasattr(model, "config"):
+        model.config.use_cache = True
+
     if auto_eval and model.training:
         model.eval()
         if verbose:

@@ -257,6 +257,9 @@ def wrap_model_with_qgfd(
     """
     gc.collect()
 
+    if hasattr(model, "config"):
+        model.config.use_cache = True
+
     if auto_eval and model.training:
         model.eval()
         if verbose:
