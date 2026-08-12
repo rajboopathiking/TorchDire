@@ -101,12 +101,13 @@ class QGFDKernel(nn.Module):
     def _eps(x: torch.Tensor) -> float:
         return 1e-3 if x.dtype in (torch.float16, torch.bfloat16) else 1e-6
 
-    def build_transition_from_keys(self, K: torch.Tensor, target_heads: Optional[int] = None) -> torch.Tensor:
+    def build_transition_from_keys(self, K: torch.Tensor, target_heads: Optional[int] = None, is_causal: bool = True) -> torch.Tensor:
         """
         Build key-based row-stochastic transition matrix P from key projections.
         Args:
             K: (B, H_k, Lk, head_dim)
             target_heads: Number of query heads H (repeats K heads if GQA/MQA).
+            is_causal: If True, applies lower-triangular causal masking to P.
         Returns:
             P: (B, H, Lk, Lk) transition matrix
         """
@@ -117,6 +118,11 @@ class QGFDKernel(nn.Module):
 
         K_norm = F.normalize(K, p=2, dim=-1, eps=self._eps(K))
         sim = torch.einsum("bhid,bhjd->bhij", K_norm, K_norm)
+        
+        if is_causal:
+            causal_mask = torch.tril(torch.ones((Lk, Lk), device=K.device, dtype=torch.bool))
+            sim = sim.masked_fill(~causal_mask[None, None, :, :], torch.finfo(sim.dtype).min)
+            
         P = F.softmax(sim, dim=-1)
 
         # 2. Isolate Position 0 (BOS / Attention Sink): Position 0 only transitions to itself
@@ -202,7 +208,16 @@ class QGFDKernel(nn.Module):
 
         return scores + additive
 
-    def _build_valid_mask(self, scores: torch.Tensor, p0: torch.Tensor) -> Optional[torch.Tensor]:
+    def _build_valid_mask(self, scores: torch.Tensor, p0: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> Optional[torch.Tensor]:
+        if attention_mask is not None:
+            if attention_mask.dtype == torch.bool:
+                valid = attention_mask
+            else:
+                valid = attention_mask > -1e4
+            if valid.all():
+                return None
+            return valid
+            
         mask = (scores > self.mask_threshold) & (p0 > 1e-12)
         if mask.all():
             return None
@@ -252,7 +267,7 @@ class QGFDKernel(nn.Module):
         if not qgfd_active:
             p = p0
         else:
-            valid_mask = self._build_valid_mask(scores, p0)
+            valid_mask = self._build_valid_mask(scores, p0, attention_mask)
             mode = self.mode
             if mode == "full" and Lk > self.max_full_seq_len:
                 if self.full_fallback_mode == "conv":

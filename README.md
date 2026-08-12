@@ -42,6 +42,28 @@ p_{t+1} = (1 - α) p_0 + α (p_t P)
 
 This makes attention less brittle: mass can flow to nearby/similar keys, which improves robustness when inputs are noisy or slightly corrupted.
 
+### 💯 100% Drop-In Softmax Replacement
+
+A massive architectural advantage of our implementation is that **QGFD strictly replaces the standard `softmax` calculation and absolutely nothing else**. It is mathematically pure and minimally invasive.
+
+```python
+# Standard Attention
+scores = torch.matmul(Q, K.T) + causal_mask
+probs = F.softmax(scores, dim=-1)           # <--- Replace this single line
+output = torch.matmul(probs, V)
+
+# QGFD Attention
+scores = torch.matmul(Q, K.T) + causal_mask
+probs = self.qgfd(scores=scores, key_states=K) # <--- 100% drop-in replacement
+output = torch.matmul(probs, V)
+```
+
+**Why this is a huge deal:**
+1. **Universal Compatibility**: QGFD natively slots into *any* existing transformer architecture without refactoring.
+2. **Zero KV-Cache Disruption**: Since it doesn't touch the attention plumbing, it fully preserves Hugging Face's native, highly-optimized KV caching and dynamic sequence masking mechanisms.
+3. **Training & LoRA Ready**: Because projection weights (`q_proj`, `k_proj`, etc.) are completely unmodified and object references are preserved, you can swap the `softmax` for `qgfd()` and immediately apply QLoRA or standard fine-tuning without breaking fundamental model internals.
+4. **Dropout Enhancement Ready**: Standard attention dropout operates natively *after* the QGFD kernel returns the diffused probabilities (`nn.functional.dropout(probs)`), making it inherently compatible with existing training regularization techniques.
+
 ---
 
 ## 🧠 `MultiHeadQGFDLayer`: Core API

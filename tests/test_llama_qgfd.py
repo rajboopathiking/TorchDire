@@ -34,11 +34,13 @@ def test_llama_qgfd_attention_forward():
         num_attention_heads=4,
         num_key_value_heads=2,
         max_position_embeddings=128,
+        attn_implementation="eager",
     )
     attn = LlamaQGFDAttention(config, diffusion_steps=2, target_alpha=0.02, warmup_steps=0)
     x = torch.randn(2, 16, 64)
+    position_ids = torch.arange(16).unsqueeze(0).expand(2, -1)
     
-    output, attn_weights, past_kv = attn(x)
+    output, attn_weights, past_kv = attn(x, position_ids=position_ids)
     assert output.shape == (2, 16, 64)
     assert not torch.isnan(output).any()
 
@@ -52,6 +54,7 @@ def test_patch_llama_model():
         num_hidden_layers=2,
         intermediate_size=128,
         max_position_embeddings=128,
+        attn_implementation="eager",
     )
     model = LlamaForCausalLM(config)
     
@@ -86,6 +89,7 @@ def test_llama_qgfd_attribute_preservation():
         num_hidden_layers=1,
         intermediate_size=128,
         max_position_embeddings=128,
+        attn_implementation="eager",
     )
     model = LlamaForCausalLM(config)
     patch_llama_with_qgfd(model, diffusion_steps=2, target_alpha=0.02, warmup_steps=0, verbose=False)
@@ -108,6 +112,7 @@ def test_llama_qgfd_rotary_fallback_and_double_patch():
         num_hidden_layers=1,
         intermediate_size=128,
         max_position_embeddings=128,
+        attn_implementation="eager",
     )
     model = LlamaForCausalLM(config)
     # Remove rotary_emb from attention layer to simulate newer transformers / custom architecture
@@ -119,7 +124,8 @@ def test_llama_qgfd_rotary_fallback_and_double_patch():
     patch_llama_with_qgfd(model, diffusion_steps=3, target_alpha=0.03, warmup_steps=0, verbose=False)
 
     x = torch.randn(2, 16, 64)
-    out, _, _ = model.model.layers[0].self_attn(x)
+    position_ids = torch.arange(16).unsqueeze(0).expand(2, -1)
+    out, _, _ = model.model.layers[0].self_attn(x, position_ids=position_ids)
     assert out.shape == (2, 16, 64)
     assert not torch.isnan(out).any()
 
@@ -133,6 +139,7 @@ def test_llama_qgfd_generation_kv_cache():
         num_hidden_layers=2,
         intermediate_size=128,
         max_position_embeddings=128,
+        attn_implementation="eager",
     )
     model = LlamaForCausalLM(config)
     patch_llama_with_qgfd(model, diffusion_steps=2, target_alpha=0.02, warmup_steps=0, verbose=False)
@@ -168,6 +175,7 @@ def test_llama_softmax_equivalence():
         num_hidden_layers=2,
         intermediate_size=128,
         max_position_embeddings=128,
+        attn_implementation="eager",
     )
     baseline = LlamaForCausalLM(config)
     qgfd = LlamaForCausalLM(config)
@@ -185,6 +193,49 @@ def test_llama_softmax_equivalence():
     diff = (base_logits - qgfd_logits).abs()
     assert diff.max().item() < 1e-5, f"Softmax equivalence failed! Max diff: {diff.max().item()}"
     assert diff.mean().item() < 1e-6, f"Softmax equivalence failed! Mean diff: {diff.mean().item()}"
+
+
+def test_llama_qgfd_dropout_enhancement():
+    """Verify that native attention dropout seamlessly applies to QGFD probabilities."""
+    config = LlamaConfig(
+        vocab_size=100,
+        hidden_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=1,
+        intermediate_size=128,
+        max_position_embeddings=128,
+        attention_dropout=0.5,  # High dropout for testing
+        attn_implementation="eager",
+    )
+    model = LlamaForCausalLM(config)
+    patch_llama_with_qgfd(model, diffusion_steps=2, target_alpha=0.02, warmup_steps=0, verbose=False)
+    
+    # Must be in train mode for dropout to activate
+    model.train()
+    
+    input_ids = torch.randint(0, 100, (2, 16))
+    
+    # We can get the attention weights by passing output_attentions=True
+    outputs = model(input_ids, output_attentions=True)
+    
+    attn_weights = outputs.attentions[0]  # Layer 0 attention weights (B, H, L, L)
+    
+    # With 0.5 dropout and a causal mask (which already zeroes ~50% of the matrix),
+    # the total zero fraction should be roughly 0.5 + 0.5 * 0.5 = 0.75
+    zero_elements = (attn_weights == 0.0).float().mean().item()
+    
+    assert zero_elements > 0.0, "No dropout applied! Expected some attention weights to be zeroed out."
+    assert 0.6 < zero_elements < 0.9, f"Dropout fraction {zero_elements} is far from expected 0.75"
+    
+    # Also verify the expected sum over the last dimension is still ~1.0
+    # Because standard Softmax sums to 1.0, and Dropout scales by 1/(1-p) while dropping p fraction,
+    # the expected sum of any row remains 1.0 (though individual rows will vary due to randomness).
+    row_sums = attn_weights.sum(dim=-1)
+    
+    non_zero_rows = row_sums[row_sums > 0]
+    assert torch.allclose(non_zero_rows.mean(), torch.tensor(1.0), atol=0.2), \
+        f"Dropout expectation failed! Mean row sum: {non_zero_rows.mean().item()}"
 
 
 if __name__ == "__main__":
