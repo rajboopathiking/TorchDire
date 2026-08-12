@@ -40,6 +40,7 @@ class QGFDKernel(nn.Module):
         debug: bool = False,
         learnable_alpha: bool = False,
         num_heads: Optional[int] = None,
+        is_causal: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -62,6 +63,7 @@ class QGFDKernel(nn.Module):
         self.debug = bool(debug)
         self.learnable_alpha = bool(learnable_alpha)
         self.num_heads = num_heads
+        self.is_causal = bool(is_causal)
 
         if self.learnable_alpha:
             assert num_heads is not None, "num_heads must be provided when learnable_alpha=True"
@@ -101,16 +103,20 @@ class QGFDKernel(nn.Module):
     def _eps(x: torch.Tensor) -> float:
         return 1e-3 if x.dtype in (torch.float16, torch.bfloat16) else 1e-6
 
-    def build_transition_from_keys(self, K: torch.Tensor, target_heads: Optional[int] = None, is_causal: bool = True) -> torch.Tensor:
+    def build_transition_from_keys(self, K: torch.Tensor, target_heads: Optional[int] = None, is_causal: Optional[bool] = None) -> torch.Tensor:
         """
         Build key-based row-stochastic transition matrix P from key projections.
         Args:
             K: (B, H_k, Lk, head_dim)
             target_heads: Number of query heads H (repeats K heads if GQA/MQA).
             is_causal: If True, applies lower-triangular causal masking to P.
+                       Defaults to self.is_causal (False) so key transitions remain unmasked across
+                       already-cached past keys, preventing probability sinks at position 0.
         Returns:
             P: (B, H, Lk, Lk) transition matrix
         """
+        if is_causal is None:
+            is_causal = getattr(self, "is_causal", False)
         B, H_k, Lk, head_dim = K.shape
         if target_heads is not None and H_k != target_heads:
             repeat_factor = target_heads // H_k
@@ -279,7 +285,7 @@ class QGFDKernel(nn.Module):
             if mode is None:
                 p = p0
             elif mode == "full":
-                P = self.build_transition_from_keys(key_states, target_heads=H)
+                P = self.build_transition_from_keys(key_states, target_heads=H, is_causal=self.is_causal)
                 p = p0
                 prev_p = None
 

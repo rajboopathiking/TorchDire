@@ -175,10 +175,20 @@ if HAS_LLAMA:
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-            if attention_mask is not None:  # no matter the length, we just slice it
-                causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-                attn_weights = attn_weights + causal_mask
+            
+            # --- Bulletproof Causal Masking ---
+            # Even if HF provides an attention_mask, it might be purely a padding mask (missing the causal part)
+            # if HF thinks SDPA or FlashAttention will handle causality internally.
+            if q_len > 1:
+                k_len = key_states.shape[-2]
+                causal_mask = torch.triu(torch.full((q_len, k_len), -1e9, dtype=attn_weights.dtype, device=attn_weights.device), diagonal=k_len - q_len + 1)
+                attn_weights = attn_weights + causal_mask[None, None, :, :]
+            
+            if attention_mask is not None:
+                # Add the HF provided mask (which handles padding)
+                hf_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+                attn_weights = attn_weights + hf_mask
+            # ----------------------------------
 
             # --- QGFD ---
             if hasattr(self, "qgfd"):
