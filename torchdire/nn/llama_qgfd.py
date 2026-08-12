@@ -251,6 +251,21 @@ def patch_llama_with_qgfd(
 
     if hasattr(model, "config"):
         model.config.use_cache = True
+        
+        # Enforce eager implementation so LlamaModel generates the additive causal mask.
+        # Without this, SDPA models pass attention_mask=None and our Eager sub-layer fails to apply causality.
+        if getattr(model.config, "_attn_implementation", "eager") != "eager":
+            model.config._attn_implementation = "eager"
+            if verbose:
+                print("[QGFD Patch] Forced model.config._attn_implementation = 'eager' to generate causal masks.")
+                
+    # LlamaModel caches `_use_sdpa` and `_use_flash_attention_2` during __init__, 
+    # so we must also forcefully disable them on the instantiated modules.
+    for m in model.modules():
+        if hasattr(m, "_use_sdpa"):
+            m._use_sdpa = False
+        if hasattr(m, "_use_flash_attention_2"):
+            m._use_flash_attention_2 = False
 
     if auto_eval and model.training:
         model.eval()
