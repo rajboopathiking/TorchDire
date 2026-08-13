@@ -137,6 +137,10 @@ if HAS_LLAMA:
         ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
             bsz, q_len, _ = hidden_states.size()
 
+            # transformers>=5 passes the cache as `past_key_values` (plural), which lands in **kwargs
+            if past_key_value is None:
+                past_key_value = kwargs.get("past_key_values", None)
+
             if self.config.pretraining_tp > 1:
                 key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
                 query_slices = self.q_proj.weight.split(
@@ -167,6 +171,7 @@ if HAS_LLAMA:
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
             if past_key_value is not None:
+                # transformers>=5 passes the cache as `past_key_values` (plural) into **kwargs
                 # sin and cos are specific to RoPE models; cache_position needed for the static cache
                 cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
                 key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
@@ -212,6 +217,8 @@ if HAS_LLAMA:
                     hf_mask = attention_mask[:, None, None, :k_len].to(attn_weights.dtype)
                 else:
                     hf_mask = attention_mask
+                if hf_mask.dtype == torch.bool:
+                    hf_mask = (~hf_mask).to(attn_weights.dtype) * -1e9
                 attn_weights = attn_weights + hf_mask
             # ----------------------------------
 

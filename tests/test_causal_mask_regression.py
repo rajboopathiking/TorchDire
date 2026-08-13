@@ -7,8 +7,9 @@ Covers:
   2. Chunked prefill with an existing cache (the case the old diagonal=... construction inverted)
   3. Decode q_len==1 steps (previously skipped masking entirely, trusting HF)
   4. Cached decode vs full-recompute agreement
-  5. Left-padded batched generation (the stress case for causal-mask bugs)
-  6. Kernel diffusion renormalization consistency with masked inputs
+5. Left-padded batched generation (the stress case for causal-mask bugs)
+   6. Kernel diffusion renormalization consistency with masked inputs
+   7. transformers>=5 "past_key_values" (plural) kwarg cache updates + bool masks
 """
 
 import torch
@@ -263,6 +264,56 @@ def test_kernel_renormalization_consistency():
         assert torch.allclose(p_plain.sum(dim=-1), torch.ones_like(p_plain.sum(dim=-1)), atol=1e-5), f"mode={mode} unmasked rows drifted"
 
 
+def test_transformers5_plural_past_kwarg_updates_cache():
+    """
+    transformers>=5 calls layer.forward with the cache as `past_key_values`
+    (plural) in **kwargs plus position_ids but no cache_position. Before the fix,
+    the singular `past_key_value` stayed None: the cache was never read/updated,
+    so every decode step attended only to the current token (repeating-token
+    collapse like "이이이..."). Also covers the 5.x sdpa-style 4D bool mask.
+    """
+    torch.manual_seed(0)
+    config = _tiny_config()
+    attn = LlamaQGFDAttention(config, layer_idx=0, diffusion_steps=2, target_alpha=0.02, warmup_steps=0)
+
+    cache = DynamicCache()
+    prompt = torch.randn(1, 8, 64)
+    out, probs, cache = attn(
+        prompt,
+        position_ids=torch.arange(8).unsqueeze(0),
+        past_key_values=cache,
+        output_attentions=True,
+    )
+    assert cache.get_seq_length() == 8, "prefill via `past_key_values` kwarg must update the cache"
+    assert probs.shape == (1, 4, 8, 8)
+
+    x = torch.randn(1, 1, 64)
+    out, probs, cache = attn(
+        x,
+        position_ids=torch.tensor([[8]]),
+        past_key_values=cache,
+        output_attentions=True,
+    )
+    assert cache.get_seq_length() == 9, "decode via `past_key_values` kwarg must append (k, v)"
+    assert probs.shape == (1, 4, 1, 9), f"decode attention must span the whole history, got {probs.shape}"
+    assert torch.allclose(probs.sum(dim=-1), torch.ones_like(probs.sum(dim=-1)), atol=1e-5)
+    assert probs[0, :, 0, :8].sum() > 0.5, "decode step not attending to past history"
+
+    # 5.x sdpa-style 4D bool mask (True = attend); key at absolute position 0 blocked
+    bool_mask = torch.ones(1, 1, 1, 10, dtype=torch.bool)
+    bool_mask[..., 0] = False
+    out, probs, cache = attn(
+        x,
+        position_ids=torch.tensor([[9]]),
+        past_key_values=cache,
+        attention_mask=bool_mask,
+        output_attentions=True,
+    )
+    assert probs.shape == (1, 4, 1, 10)
+    assert (probs[..., 0] == 0.0).all(), "bool mask did not zero the blocked key column"
+    assert torch.allclose(probs.sum(dim=-1), torch.ones_like(probs.sum(dim=-1)), atol=1e-5)
+
+
 if __name__ == "__main__":
     test_prefill_causal_strictness()
     test_chunked_prefill_causal_with_cache()
@@ -270,4 +321,5 @@ if __name__ == "__main__":
     test_cached_decode_matches_full_recompute()
     test_left_padded_batch_generation()
     test_kernel_renormalization_consistency()
+    test_transformers5_plural_past_kwarg_updates_cache()
     print("All causal-mask regression tests passed successfully!")
