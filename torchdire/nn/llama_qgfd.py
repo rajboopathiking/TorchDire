@@ -177,16 +177,41 @@ if HAS_LLAMA:
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
             
             # --- Bulletproof Causal Masking ---
-            # Even if HF provides an attention_mask, it might be purely a padding mask (missing the causal part)
-            # if HF thinks SDPA or FlashAttention will handle causality internally.
-            if q_len > 1:
-                k_len = key_states.shape[-2]
-                causal_mask = torch.triu(torch.full((q_len, k_len), -1e9, dtype=attn_weights.dtype, device=attn_weights.device), diagonal=k_len - q_len + 1)
-                attn_weights = attn_weights + causal_mask[None, None, :, :]
-            
+            # Self-contained causal mask driven by cache_position (falling back to
+            # position_ids, then to arange). Correct for prefill (past=0), decode
+            # (q_len==1), and chunked prefill (q_len>1 with an existing cache),
+            # independent of what HF decides to pass in attention_mask. Uses a single
+            # masked_fill instead of additive stacking so the mask value never
+            # accumulates across multiple masking sources.
+            k_len = key_states.shape[-2]
+            past_seen = k_len - q_len
+            if cache_position is not None:
+                if not torch.is_tensor(cache_position):
+                    cache_position = torch.tensor(cache_position, device=attn_weights.device)
+                q_abs = cache_position.reshape(-1).to(device=attn_weights.device, dtype=torch.long)
+            elif position_ids is not None:
+                pos = position_ids
+                if pos.dim() > 1:
+                    pos = pos[0]
+                q_abs = pos.reshape(-1)[:q_len].to(device=attn_weights.device, dtype=torch.long)
+            else:
+                q_abs = torch.arange(past_seen, k_len, device=attn_weights.device)
+
+            key_abs = torch.arange(k_len, device=attn_weights.device)
+            future = key_abs[None, :] > q_abs[:, None]  # (q_len, k_len) bool
+            if future.any():
+                attn_weights = attn_weights.masked_fill(
+                    future[None, None, :, :], torch.finfo(attn_weights.dtype).min
+                )
+
             if attention_mask is not None:
                 # Add the HF provided mask (which handles padding)
-                hf_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+                if attention_mask.dim() == 4:
+                    hf_mask = attention_mask[:, :, :, :k_len]
+                elif attention_mask.dim() == 2:
+                    hf_mask = attention_mask[:, None, None, :k_len].to(attn_weights.dtype)
+                else:
+                    hf_mask = attention_mask
                 attn_weights = attn_weights + hf_mask
             # ----------------------------------
 

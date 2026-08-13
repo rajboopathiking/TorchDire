@@ -187,8 +187,8 @@ class QGFDKernel(nn.Module):
             p_next = (1.0 - alpha_eff) * p0 + alpha_eff * p_conv
             if valid_mask is not None:
                 p_next = p_next * valid_mask.to(p_next.dtype)
-                Z = p_next.sum(dim=-1, keepdim=True).clamp(min=self._eps(p_next))
-                p_next = p_next / Z
+            Z = p_next.sum(dim=-1, keepdim=True).clamp(min=self._eps(p_next))
+            p_next = p_next / Z
 
             if prev_p is not None and torch.max(torch.abs(p_next - prev_p)) < self.early_stop_eps:
                 p = p_next
@@ -294,8 +294,8 @@ class QGFDKernel(nn.Module):
 
                     if valid_mask is not None:
                         p_next = p_next * valid_mask.to(p_next.dtype)
-                        Z = p_next.sum(dim=-1, keepdim=True).clamp(min=self._eps(p_next))
-                        p_next = p_next / Z
+                    Z = p_next.sum(dim=-1, keepdim=True).clamp(min=self._eps(p_next))
+                    p_next = p_next / Z
 
                     if prev_p is not None and torch.max(torch.abs(p_next - prev_p)) < self.early_stop_eps:
                         p = p_next
