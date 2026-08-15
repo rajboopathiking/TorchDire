@@ -69,7 +69,15 @@ class QGFDKernel(nn.Module):
             assert num_heads is not None, "num_heads must be provided when learnable_alpha=True"
             self.alpha_param = nn.Parameter(torch.full((num_heads,), fill_value=float(target_alpha)))
 
-        # Step count buffer for warmup schedule
+        # Step count buffer for warmup schedule.
+        # NOTE: this must NEVER be mutated inside forward(). The trainer drives
+        # it via set_step() (see QGFDStepCallback) so that a gradient-checkpoint
+        # recomputation replays forward() with the exact same alpha schedule.
+        # Incrementing it in forward() makes the warmup branch diverge between
+        # the forward pass and its recompute (alpha flips from 0 to ~1e-6,
+        # switching the diffusion branch) and raises
+        # torch.utils.checkpoint.CheckpointError: "Recomputed values ... have
+        # different metadata than during the forward pass".
         self.register_buffer("step_count", torch.zeros(1, dtype=torch.long))
 
         # Conv mode parameter setup
@@ -84,6 +92,16 @@ class QGFDKernel(nn.Module):
                 "conv_kernel",
                 nn.Parameter(kernel.view(1, 1, kernel_size)),
             )
+
+    def set_step(self, step: int) -> None:
+        """Externally set the global training step driving the alpha warmup.
+
+        The trainer must call this once per optimizer step, outside the model
+        forward. Keeping the step external is what makes the QGFD kernel
+        gradient-checkpoint safe: forward and recompute then see the same
+        alpha, so they build the identical computational graph.
+        """
+        self.step_count.fill_(int(step))
 
     def get_alpha(self) -> Union[float, torch.Tensor]:
         """Calculate effective alpha based on step_count and max_alpha bound."""
@@ -123,7 +141,12 @@ class QGFDKernel(nn.Module):
             K = torch.repeat_interleave(K, repeat_factor, dim=1)
 
         K_norm = F.normalize(K, p=2, dim=-1, eps=self._eps(K))
-        sim = torch.einsum("bhid,bhjd->bhij", K_norm, K_norm)
+        # torch.matmul (not torch.einsum): einsum's internal batch-matmul path
+        # flattens batch dims to 3D views whose saved-tensor metadata can differ
+        # between a forward pass and its gradient-checkpoint recompute
+        # (use_reentrant=False), raising "Recomputed values ... different metadata".
+        # matmul on 4D operands always saves the native 4D tensors.
+        sim = torch.matmul(K_norm, K_norm.transpose(-1, -2))
         
         if is_causal:
             causal_mask = torch.tril(torch.ones((Lk, Lk), device=K.device, dtype=torch.bool))
@@ -258,7 +281,35 @@ class QGFDKernel(nn.Module):
             )
             self._warned_training_mode = True
 
+        if self.debug:
+            print(
+                "[QGFD]",
+                "training=", self.training,
+                "grad=", torch.is_grad_enabled(),
+                "scores=", tuple(scores.shape),
+                "dtype=", scores.dtype,
+                "device=", scores.device,
+            )
+
+        # Shape invariant: scores and the returned probabilities must ALWAYS
+        # be [B, H, Lq, Lk]. Any internal flattening (e.g. [B*H, Lq, Lk] for
+        # the conv kernel) must be restored before returning; a shape change
+        # between forward and checkpoint recomputation is rejected by
+        # torch.utils.checkpoint with "Recomputed values ... different
+        # metadata".
+        assert scores.dim() == 4, f"QGFD expected scores [B,H,Q,K], got {scores.shape}"
         B, H, Lq, Lk = scores.shape
+
+        if self.training and self.warmup_steps > 0 and float(self.step_count.item()) == 0.0 and not hasattr(self, "_warned_step_control"):
+            import warnings
+            warnings.warn(
+                "QGFD warmup_steps>0 but step_count is 0: the warmup schedule is externally "
+                "controlled — call kernel.set_step(step) (or register the QGFDStepCallback "
+                "on your trainer) once per optimizer step, otherwise alpha stays 0 and "
+                "diffusion never activates during training.",
+                stacklevel=2,
+            )
+            self._warned_step_control = True
 
         if attention_mask is not None:
             scores = self.apply_attention_mask(scores, attention_mask)
@@ -268,6 +319,9 @@ class QGFDKernel(nn.Module):
 
         alpha_eff = self.get_alpha()
         alpha_nonzero = (alpha_eff != 0.0).any().item() if isinstance(alpha_eff, torch.Tensor) else abs(alpha_eff) > 0.0
+        # `alpha` derives from step_count, which is only changed by the trainer
+        # via set_step() OUTSIDE the forward — so forward and checkpoint
+        # recomputation always see the same alpha and take the same branch.
         qgfd_active = self.enable_qgfd and self.diffusion_steps > 0 and alpha_nonzero
 
         if not qgfd_active:
@@ -290,13 +344,17 @@ class QGFDKernel(nn.Module):
                 prev_p = None
 
                 for _ in range(self.diffusion_steps):
-                    p_next = (1.0 - alpha_eff) * p0 + alpha_eff * torch.einsum("bhqn,bhnm->bhqm", p, P)
+                    p_next = (1.0 - alpha_eff) * p0 + alpha_eff * torch.matmul(p, P)
 
                     if valid_mask is not None:
                         p_next = p_next * valid_mask.to(p_next.dtype)
                     Z = p_next.sum(dim=-1, keepdim=True).clamp(min=self._eps(p_next))
                     p_next = p_next / Z
 
+                    # The early-stop break is data-dependent, but it is safe
+                    # under checkpointing because alpha is externally fixed:
+                    # recomputation reproduces bitwise-identical p_next values
+                    # and therefore takes the same branch.
                     if prev_p is not None and torch.max(torch.abs(p_next - prev_p)) < self.early_stop_eps:
                         p = p_next
                         break
@@ -311,9 +369,68 @@ class QGFDKernel(nn.Module):
                 head_mask = head_mask.view(1, -1, 1, 1)
             p = p * head_mask
 
-        if self.training:
-            self.step_count += 1
-            if self.step_count.item() > 10**12:
-                self.step_count.zero_()
+        assert p.dim() == 4 and p.shape == (B, H, Lq, Lk), (
+            f"QGFD changed attention shape: expected {(B, H, Lq, Lk)}, got {p.shape}"
+        )
+
+        if self.debug:
+            print("[QGFD OUT]", "P=", tuple(p.shape), "alpha=", alpha_eff)
 
         return p
+
+
+try:
+    from transformers import TrainerCallback
+
+    _HAS_TRAINER_CALLBACK = True
+except ImportError:
+    TrainerCallback = None
+    _HAS_TRAINER_CALLBACK = False
+
+
+if _HAS_TRAINER_CALLBACK:
+
+    class QGFDStepCallback(TrainerCallback):
+        """Advance every QGFDKernel's step_count once per optimizer step.
+
+        The step must be set OUTSIDE the model forward: a counter mutated
+        inside forward() changes alpha between the forward pass and its
+        gradient-checkpoint recomputation, which can flip the diffusion
+        branch and crash with
+        torch.utils.checkpoint.CheckpointError ("Recomputed values ... have
+        different metadata"). Register via `register_qgfd_step_callback`.
+        """
+
+        def __init__(self, kernels):
+            self.kernels = list(kernels)
+
+        def on_step_begin(self, args, state, control, **kwargs):
+            step = int(getattr(state, "global_step", 0))
+            for kernel in self.kernels:
+                kernel.set_step(step)
+
+
+def collect_qgfd_kernels(model) -> list:
+    """Return every QGFDKernel instance found in `model` (incl. PEFT wrappers)."""
+    kernels = []
+    for module in model.modules():
+        if isinstance(module, QGFDKernel):
+            kernels.append(module)
+    return kernels
+
+
+def register_qgfd_step_callback(trainer, model):
+    """Register a QGFDStepCallback on `trainer` for all QGFD kernels in `model`.
+
+    Required for the alpha warmup schedule to progress during training with
+    gradient checkpointing. Returns the callback, or None if the model has no
+    QGFD kernels.
+    """
+    if not _HAS_TRAINER_CALLBACK:
+        raise ImportError("register_qgfd_step_callback requires `transformers` (TrainerCallback).")
+    kernels = collect_qgfd_kernels(model)
+    if not kernels:
+        return None
+    callback = QGFDStepCallback(kernels)
+    trainer.add_callback(callback)
+    return callback

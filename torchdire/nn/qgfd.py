@@ -116,7 +116,7 @@ class MultiHeadQGFDLayer(nn.Module):
         K = self.k_proj(kv).view(B, Lk, self.num_heads, self.head_dim).transpose(1, 2)
         V = self.v_proj(kv).view(B, Lk, self.num_heads, self.head_dim).transpose(1, 2)
 
-        scores = torch.einsum("bhqd,bhkd->bhqk", Q, K) / math.sqrt(self.head_dim)
+        scores = torch.matmul(Q, K.transpose(-1, -2)) / math.sqrt(self.head_dim)
 
         p = self.kernel(
             scores=scores,
@@ -125,7 +125,7 @@ class MultiHeadQGFDLayer(nn.Module):
             head_mask=head_mask,
         )
 
-        attn_output_raw = torch.einsum("bhqk,bhkd->bhqd", p, V)
+        attn_output_raw = torch.matmul(p, V)
         attn_output_raw = attn_output_raw.transpose(1, 2).contiguous().view(B, Lq, self.proj_dim)
         attn_output = self.out_proj(attn_output_raw)
 
