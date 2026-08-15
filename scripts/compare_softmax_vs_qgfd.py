@@ -16,9 +16,18 @@
 #
 # Usage:  python compare_softmax_vs_qgfd.py --steps 100
 # ============================================================
+import os
+
+# Kaggle hosts expose 2 T4s, so TRL/transformers wraps the model in
+# nn.DataParallel regardless of device_map={"": 0}. bitsandbytes 4-bit
+# linears are NOT thread-safe under DataParallel and corrupt memory, which
+# CUDA reports asynchronously as "CUDA error: an illegal memory access" at
+# the next kernel. Expose a single GPU so the Trainer never DataParallel
+# wraps (override with QGFD_CUDA_VISIBLE_DEVICES to opt back into 2 GPUs).
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+
 import argparse
 import inspect
-import os
 import time
 
 import torch
