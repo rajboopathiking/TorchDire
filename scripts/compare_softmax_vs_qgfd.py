@@ -14,17 +14,22 @@
 # via memorization and carries no signal).
 # Cost:   wall time and it/s for each run.
 #
-# Usage:  python compare_softmax_vs_qgfd.py --steps 100
+# Usage:
+#   single GPU (default): python compare_softmax_vs_qgfd.py --steps 100
+#   multi GPU (DDP, 2x T4): accelerate launch --multi_gpu --num_processes 2 \
+#       compare_softmax_vs_qgfd.py --steps 100
 # ============================================================
 import os
 
-# Kaggle hosts expose 2 T4s, so TRL/transformers wraps the model in
-# nn.DataParallel regardless of device_map={"": 0}. bitsandbytes 4-bit
-# linears are NOT thread-safe under DataParallel and corrupt memory, which
-# CUDA reports asynchronously as "CUDA error: an illegal memory access" at
-# the next kernel. Expose a single GPU so the Trainer never DataParallel
-# wraps (override with QGFD_CUDA_VISIBLE_DEVICES to opt back into 2 GPUs).
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+# Kaggle hosts expose 2 T4s. In a plain `python` run, TRL/transformers wraps
+# the model in nn.DataParallel regardless of device_map={"": 0}, and
+# bitsandbytes 4-bit linears are NOT safe under DataParallel (async "CUDA
+# error: an illegal memory access" at the next kernel). Pin a single GPU so
+# the Trainer never DataParallel-wraps. For real multi-GPU use accelerate
+# launch (DDP): accelerate sets LOCAL_RANK/RANK before this module imports,
+# so the pin is skipped and each process gets its own GPU.
+if "LOCAL_RANK" not in os.environ and "RANK" not in os.environ:
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
 import argparse
 import inspect
@@ -84,6 +89,12 @@ def format_example(example):
             f"### Instruction:\n{example['instruction']}\n\n### Response:\n{example['output']}"
         )
     return {"text": prompt}
+
+
+def _main_process() -> bool:
+    if not torch.distributed.is_initialized():
+        return True
+    return torch.distributed.get_rank() == 0
 
 
 def run_experiment(args, seed, tag, enable_qgfd, target_alpha, warmup_steps, learnable_alpha=False):
@@ -212,6 +223,9 @@ def main():
             warmup_steps=args.steps,
             learnable_alpha=args.learnable_alpha,
         ))
+
+    if not _main_process():
+        return
 
     print("\n=== RESULT (equal budget: %d steps, seed %d%s) ===" % (
         args.steps, args.seed,

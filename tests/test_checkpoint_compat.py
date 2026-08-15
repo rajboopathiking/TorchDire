@@ -205,6 +205,62 @@ def test_qgfd_kernel_grad_stability_with_detach_P():
         assert torch.isfinite(out).all()
 
 
+def test_warning_training_mode_only_fires_without_grad():
+    # The training-mode warning exists to catch inference without model.eval().
+    # Real training always runs with grad enabled and must stay quiet.
+    import warnings
+
+    torch.manual_seed(0)
+    kernel = QGFDKernel(diffusion_steps=2, target_alpha=0.05, warmup_steps=0, is_causal=True)
+    kernel.train()
+    scores = torch.randn(2, 4, 8, 8, requires_grad=True)
+    K = torch.randn(2, 4, 8, 8)
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        kernel(scores=scores, key_states=K, attention_mask=None).sum().backward()
+        assert not any("training=True" in str(x.message) for x in w), \
+            "must not warn during real training (grad enabled)"
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        with torch.no_grad():
+            kernel(scores=scores.detach(), key_states=K, attention_mask=None)
+        assert any("training=True" in str(x.message) for x in w), \
+            "must warn for inference without model.eval()"
+
+
+def test_warning_step_control_requires_no_callback():
+    # The warmup step-control warning must fire only when NO QGFDStepCallback
+    # is registered (register_qgfd_step_callback sets the class flag); a
+    # callback-driven training loop must never see it.
+    import warnings
+    from torchdire import QGFDKernel as KClass
+
+    torch.manual_seed(0)
+    kernel = QGFDKernel(diffusion_steps=2, target_alpha=0.05, warmup_steps=100, is_causal=True)
+    kernel.train()
+    scores = torch.randn(2, 4, 8, 8, requires_grad=True)
+    K = torch.randn(2, 4, 8, 8)
+
+    try:
+        KClass._qgfd_callback_registered = False
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            kernel(scores=scores, key_states=K, attention_mask=None)
+            assert any("no QGFDStepCallback" in str(x.message) for x in w), \
+                "must warn when no callback drives the warmup"
+
+        KClass._qgfd_callback_registered = True
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            kernel(scores=scores, key_states=K, attention_mask=None)
+            assert not any("no QGFDStepCallback" in str(x.message) for x in w), \
+                "must stay quiet when a callback is registered"
+    finally:
+        KClass._qgfd_callback_registered = False
+
+
 def test_mixed_dtype_scores_fp32_keys_bf16():
     # Regression: real bf16 training (42dot 1.3B + bf16 autocast) upcasts
     # scores to fp32 but passes bf16 key_states; the transition matrix then

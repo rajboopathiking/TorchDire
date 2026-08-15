@@ -22,6 +22,10 @@ class QGFDKernel(nn.Module):
         attention_probs: Diffusion-regularized probabilities of shape (B, H, Lq, Lk)
     """
 
+    # Set True by register_qgfd_step_callback once any trainer drives the
+    # warmup schedule; suppresses the "no callback" training warning.
+    _qgfd_callback_registered = False
+
     def __init__(
         self,
         diffusion_steps: int = 4,
@@ -281,7 +285,10 @@ class QGFDKernel(nn.Module):
         Returns:
             attention_probs: (B, H, Lq, Lk)
         """
-        if self.training and not hasattr(self, "_warned_training_mode"):
+        if self.training and not torch.is_grad_enabled() and not hasattr(self, "_warned_training_mode"):
+            # Real training always runs with grad enabled, so this only fires
+            # for inference/generation paths that forgot model.eval() — the
+            # alpha warmup schedule and dropout are training-mode-dependent.
             import warnings
             warnings.warn(
                 "QGFDKernel.forward called with module.training=True. If you're doing "
@@ -317,13 +324,24 @@ class QGFDKernel(nn.Module):
         # matches p0's dtype (also gives fp32 numerics for the diffusion).
         key_states = key_states.to(scores.dtype)
 
-        if self.training and self.warmup_steps > 0 and float(self.step_count.item()) == 0.0 and not hasattr(self, "_warned_step_control"):
+        if (
+            self.training
+            and torch.is_grad_enabled()
+            and self.warmup_steps > 0
+            and float(self.step_count.item()) == 0.0
+            and not QGFDKernel._qgfd_callback_registered
+            and not hasattr(self, "_warned_step_control")
+        ):
+            # Training always starts at step 0, so step==0 alone is not a bug;
+            # the warning only means "no QGFDStepCallback is driving the warmup"
+            # (register_qgfd_step_callback sets the class flag). Eval-mode
+            # forwards are excluded: they use full alpha regardless of step.
             import warnings
             warnings.warn(
-                "QGFD warmup_steps>0 but step_count is 0: the warmup schedule is externally "
-                "controlled — call kernel.set_step(step) (or register the QGFDStepCallback "
-                "on your trainer) once per optimizer step, otherwise alpha stays 0 and "
-                "diffusion never activates during training.",
+                "QGFD warmup_steps>0 but no QGFDStepCallback is registered on the trainer: "
+                "the warmup schedule is externally controlled — call kernel.set_step(step) "
+                "(or register the QGFDStepCallback) once per optimizer step, otherwise alpha "
+                "stays 0 and diffusion never activates during training.",
                 stacklevel=2,
             )
             self._warned_step_control = True
@@ -476,6 +494,7 @@ def register_qgfd_step_callback(trainer, model):
     kernels = collect_qgfd_kernels(model)
     if not kernels:
         return None
+    QGFDKernel._qgfd_callback_registered = True
     callback = QGFDStepCallback(kernels)
     trainer.add_callback(callback)
     return callback
