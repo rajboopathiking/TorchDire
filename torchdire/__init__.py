@@ -4,7 +4,12 @@ TorchDire: Query-Graph Flow Diffusion (QGFD) Ecosystem for PyTorch
 A research and development library for diffusion-regularized attention mechanisms in Transformers.
 """
 
-from torchdire.nn.qgfd_kernel import QGFDKernel
+from torchdire.nn.qgfd_kernel import (
+    QGFDKernel,
+    QGFDStepCallback,
+    collect_qgfd_kernels,
+    register_qgfd_step_callback,
+)
 from torchdire.nn.qgfd import MultiHeadQGFDLayer
 from torchdire.nn.gating import QGFDMultiHeadAttention
 from torchdire.nn.llama_qgfd import LlamaQGFDAttention, patch_llama_with_qgfd
@@ -19,6 +24,9 @@ __author__ = "Raj Boopathi"
 
 __all__ = [
     "QGFDKernel",
+    "QGFDStepCallback",
+    "collect_qgfd_kernels",
+    "register_qgfd_step_callback",
     "MultiHeadQGFDLayer",
     "QGFDMultiHeadAttention",
     "LlamaQGFDAttention",
