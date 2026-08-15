@@ -300,6 +300,13 @@ class QGFDKernel(nn.Module):
         assert scores.dim() == 4, f"QGFD expected scores [B,H,Q,K], got {scores.shape}"
         B, H, Lq, Lk = scores.shape
 
+        # key_states arrives in the model dtype (e.g. bfloat16) while scores are
+        # upcast to fp32 by the attention wrapper. Mixing dtypes in the diffusion
+        # loop crashes with "expected scalar type Float but found BFloat16" in
+        # torch.matmul(p, P). Align K with scores so the transition matrix
+        # matches p0's dtype (also gives fp32 numerics for the diffusion).
+        key_states = key_states.to(scores.dtype)
+
         if self.training and self.warmup_steps > 0 and float(self.step_count.item()) == 0.0 and not hasattr(self, "_warned_step_control"):
             import warnings
             warnings.warn(

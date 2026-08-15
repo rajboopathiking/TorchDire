@@ -140,3 +140,35 @@ def test_qgfd_kernel_grad_stability_with_detach_P():
         K = torch.randn(B, H, L, d, requires_grad=True)
         out = _checkpoint_step(kernel, scores, K)
         assert torch.isfinite(out).all()
+
+
+def test_mixed_dtype_scores_fp32_keys_bf16():
+    # Regression: real bf16 training (42dot 1.3B + bf16 autocast) upcasts
+    # scores to fp32 but passes bf16 key_states; the transition matrix then
+    # mismatched p0's dtype and torch.matmul raised
+    # "expected scalar type Float but found BFloat16" in the diffusion loop.
+    torch.manual_seed(0)
+    B, H, L, d = 2, 4, 16, 32
+    for mode in ("full", "conv"):
+        kernel = QGFDKernel(
+            diffusion_steps=2,
+            target_alpha=0.05,
+            warmup_steps=0,
+            mode=mode,
+            kernel_size=5,
+            is_causal=True,
+        )
+        kernel.train()
+        scores = torch.randn(B, H, L, L, requires_grad=True)  # fp32 (attention wrapper upcast)
+        K = torch.randn(B, H, L, d, dtype=torch.bfloat16, requires_grad=True)  # model dtype
+        out = _checkpoint_step(kernel, scores, K)
+        assert out.dtype == torch.float32
+        assert torch.isfinite(out).all()
+
+    # reverse mix: bf16 scores with fp32 keys must also work
+    kernel = QGFDKernel(diffusion_steps=2, target_alpha=0.05, warmup_steps=0, is_causal=True)
+    kernel.train()
+    scores = torch.randn(B, H, L, L, dtype=torch.bfloat16, requires_grad=True)
+    K = torch.randn(B, H, L, d, requires_grad=True)
+    out = _checkpoint_step(kernel, scores, K)
+    assert torch.isfinite(out).all()
