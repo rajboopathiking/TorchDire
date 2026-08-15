@@ -23,6 +23,13 @@ MODEL_ID = "42dot/42dot_LLM-SFT-1.3B"
 OUTPUT_DIR = "./42dot-alpagasus-lora"
 
 # --- 1. Model & tokenizer ---
+# Memory-safe load: bf16 (~2.6GB) + device_map="auto" so the model is split
+# across ALL GPUs (with 2x T4, fp32 + no device_map piles everything onto
+# cuda:0 and SFTTrainer init OOMs while moving the model).
+import os
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 tokenizer.pad_token = tokenizer.eos_token
 
@@ -30,6 +37,7 @@ model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     torch_dtype=torch.bfloat16,
     device_map="auto",
+    low_cpu_mem_usage=True,
 )
 
 # --- 1b. Optional: QGFD attention patch (research pipeline) ---
