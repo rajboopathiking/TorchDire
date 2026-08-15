@@ -416,6 +416,16 @@ if _HAS_TRAINER_CALLBACK:
             for kernel in self.kernels:
                 kernel.set_step(step)
 
+        def on_optimizer_step(self, args, state, control, **kwargs):
+            # TRL>=1.0 no longer invokes on_step_begin in its training loop, so
+            # the warmup step would never advance there. on_optimizer_step is
+            # called right after each optimizer step (global_step already
+            # incremented) and keeps forward/recompute on the same alpha for
+            # the NEXT forward. Harmless if both fire (same global_step).
+            step = int(getattr(state, "global_step", 0))
+            for kernel in self.kernels:
+                kernel.set_step(step)
+
 
 def collect_qgfd_kernels(model) -> list:
     """Return every QGFDKernel instance found in `model` (incl. PEFT wrappers)."""

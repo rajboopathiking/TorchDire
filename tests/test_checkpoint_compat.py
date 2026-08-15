@@ -106,6 +106,36 @@ def test_set_step_controls_alpha():
     assert abs(kernel.get_alpha() - 0.02) < 1e-9  # capped at target_alpha
 
 
+def test_callback_fires_on_both_step_hooks():
+    # TRL>=1.0 skips on_step_begin in its training loop; the callback must also
+    # advance the step from on_optimizer_step, otherwise the warmup schedule
+    # silently stays at alpha=0 during training.
+    from torchdire import QGFDStepCallback
+
+    class Args:
+        pass
+
+    class Control:
+        pass
+
+    class State:
+        global_step = 0
+
+    kernel = QGFDKernel(diffusion_steps=2, target_alpha=0.02, warmup_steps=20000)
+    cb = QGFDStepCallback([kernel])
+    state = State()
+
+    cb.on_optimizer_step(Args(), state, Control())
+    state.global_step += 1
+    cb.on_step_begin(Args(), state, Control())
+    state.global_step += 1
+    cb.on_optimizer_step(Args(), state, Control())
+
+    # step advanced through both hooks without the warmup footgun warning
+    assert kernel.get_alpha() > 0.0
+    assert not hasattr(kernel, "_warned_step_control")
+
+
 def test_multibead_qgfd_checkpoint_compat():
     torch.manual_seed(0)
     layer = MultiHeadQGFDLayer(
