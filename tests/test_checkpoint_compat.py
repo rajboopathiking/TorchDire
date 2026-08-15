@@ -235,3 +235,76 @@ def test_mixed_dtype_scores_fp32_keys_bf16():
     K = torch.randn(B, H, L, d, requires_grad=True)
     out = _checkpoint_step(kernel, scores, K)
     assert torch.isfinite(out).all()
+
+
+def test_learnable_alpha_trains_per_head():
+    # Per-head selectivity hypothesis: heads must be able to LEARN their own
+    # alpha (self-select diffusion), so alpha_param must receive gradients
+    # through the checkpointed diffusion and move under an optimizer.
+    torch.manual_seed(0)
+    B, H, L, d = 2, 4, 16, 32
+    kernel = QGFDKernel(
+        diffusion_steps=2,
+        target_alpha=0.05,
+        warmup_steps=0,
+        learnable_alpha=True,
+        num_heads=H,
+        is_causal=True,
+    )
+    kernel.train()
+    assert kernel.alpha_param.shape == (H,)
+
+    W = torch.rand(B, H, L, L)  # fixed weights: out.sum() is alpha-invariant (row mass is constant)
+
+    def step():
+        scores = torch.randn(B, H, L, L)
+        K = torch.randn(B, H, L, d)
+        out = torch.utils.checkpoint.checkpoint(
+            lambda: kernel(scores=scores, key_states=K, attention_mask=None),
+            use_reentrant=False,
+        )
+        (out * W).sum().backward()
+        return out
+
+    for _ in range(3):
+        out = step()
+        assert kernel.alpha_param.grad is not None and torch.isfinite(kernel.alpha_param.grad).all()
+        with torch.no_grad():
+            kernel.alpha_param.sub_(0.05 * kernel.alpha_param.grad)
+        kernel.alpha_param.grad = None
+        assert torch.isfinite(kernel.alpha_param).all()
+
+    # per-head alpha is used as [1, H, 1, 1] and at least one head diverged
+    a = kernel.get_alpha()
+    assert a.shape == (1, H, 1, 1)
+    assert (a != a[0, 0].item()).any() or (a != 0.05).any()
+
+
+def test_learnable_alpha_eval_and_unfreeze():
+    from torchdire import unfreeze_qgfd_alpha
+
+    torch.manual_seed(0)
+    H = 4
+    kernel = QGFDKernel(
+        diffusion_steps=2,
+        target_alpha=0.05,
+        warmup_steps=20000,
+        learnable_alpha=True,
+        num_heads=H,
+        is_causal=True,
+    )
+    kernel.train()
+    assert kernel.get_alpha().shape == (1, H, 1, 1)
+
+    # freeze (simulating prepare_model_for_kbit_training / PEFT) then unfreeze
+    kernel.alpha_param.requires_grad_(False)
+    assert kernel.alpha_param.requires_grad is False
+    n = unfreeze_qgfd_alpha(kernel)
+    assert n == 1
+    assert kernel.alpha_param.requires_grad is True
+
+    # eval mode: full learned alpha, step-independent
+    kernel.eval()
+    a = kernel.get_alpha()
+    assert a.shape == (1, H, 1, 1)
+    assert torch.allclose(a[0, :, 0, 0], kernel.alpha_param.clamp(-kernel.max_alpha, kernel.max_alpha))

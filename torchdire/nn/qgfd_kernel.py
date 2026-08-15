@@ -446,6 +446,24 @@ def collect_qgfd_kernels(model) -> list:
     return kernels
 
 
+def unfreeze_qgfd_alpha(model) -> int:
+    """Make learnable per-head alpha params trainable (requires_grad=True).
+
+    prepare_model_for_kbit_training / PEFT freeze every base-model parameter,
+    which would freeze QGFDKernel.alpha_param and silently disable the
+    per-head selectivity experiment (hypothesis: heads self-select whether
+    diffusion helps). Call AFTER the trainer is created (so PEFT's freeze
+    pass has already run and the optimizer will pick up alpha_param).
+    Returns the number of unfrozen kernels.
+    """
+    n = 0
+    for module in model.modules():
+        if isinstance(module, QGFDKernel) and module.learnable_alpha:
+            module.alpha_param.requires_grad_(True)
+            n += 1
+    return n
+
+
 def register_qgfd_step_callback(trainer, model):
     """Register a QGFDStepCallback on `trainer` for all QGFD kernels in `model`.
 

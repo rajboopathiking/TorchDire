@@ -153,6 +153,52 @@ def test_patch_gives_each_layer_its_own_rotary():
     assert torch.isfinite(loss)
 
 
+def test_patch_learnable_alpha_per_layer():
+    # Per-head selectivity hypothesis: learnable_alpha=True must give every
+    # layer its own alpha_param (one per head) that flows through the patch,
+    # stays trainable through backward, and is frozen by PEFT-style freezes
+    # until unfreeze_qgfd_alpha restores it.
+    from torchdire import collect_qgfd_kernels, unfreeze_qgfd_alpha
+
+    config = LlamaConfig(
+        vocab_size=100,
+        hidden_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=2,
+        intermediate_size=128,
+        max_position_embeddings=128,
+        attn_implementation="eager",
+    )
+    model = LlamaForCausalLM(config)
+    patch_llama_with_qgfd(
+        model, diffusion_steps=2, target_alpha=0.05, warmup_steps=0,
+        learnable_alpha=True, verbose=False,
+    )
+
+    kernels = collect_qgfd_kernels(model)
+    assert len(kernels) == 2, "one kernel per layer (it holds all heads internally)"
+    for k in kernels:
+        assert k.learnable_alpha
+        assert k.alpha_param.shape == (4,)
+        assert k.alpha_param.requires_grad
+
+    # forward+backward trains alpha_param through the whole model
+    input_ids = torch.randint(0, 100, (2, 16))
+    loss = model(input_ids, labels=input_ids).loss
+    loss.backward()
+    for k in kernels:
+        assert k.alpha_param.grad is not None and torch.isfinite(k.alpha_param.grad).all()
+
+    # simulate PEFT freeze -> alpha frozen -> unfreeze restores
+    for k in kernels:
+        k.alpha_param.requires_grad_(False)
+    assert all(not k.alpha_param.requires_grad for k in kernels)
+    n = unfreeze_qgfd_alpha(model)
+    assert n == len(kernels)
+    assert all(k.alpha_param.requires_grad for k in kernels)
+
+
 def test_llama_qgfd_attribute_preservation():
     config = LlamaConfig(
         vocab_size=100,

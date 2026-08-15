@@ -86,7 +86,7 @@ def format_example(example):
     return {"text": prompt}
 
 
-def run_experiment(args, seed, tag, enable_qgfd, target_alpha, warmup_steps):
+def run_experiment(args, seed, tag, enable_qgfd, target_alpha, warmup_steps, learnable_alpha=False):
     torch.manual_seed(seed)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -113,12 +113,17 @@ def run_experiment(args, seed, tag, enable_qgfd, target_alpha, warmup_steps):
         warmup_steps=warmup_steps,
         early_stop_eps=0.0,
         enable_qgfd=enable_qgfd,
+        learnable_alpha=learnable_alpha if enable_qgfd else False,
         verbose=args.verbose,
     )
 
     ds = load_dataset("arbml/alpagasus_cleaned")["train"].map(format_example)
     ds = ds.train_test_split(test_size=0.2, seed=seed)
     train_ds, test_ds = ds["train"], ds["test"]
+    if args.max_train_samples > 0:
+        train_ds = train_ds.select(range(min(len(train_ds), args.max_train_samples)))
+    if args.max_eval_samples > 0:
+        test_ds = test_ds.select(range(min(len(test_ds), args.max_eval_samples)))
 
     lora_config = LoraConfig(
         r=16,
@@ -137,6 +142,12 @@ def run_experiment(args, seed, tag, enable_qgfd, target_alpha, warmup_steps):
         peft_config=lora_config,
     )
     register_qgfd_step_callback(trainer, model)
+    if learnable_alpha:
+        from torchdire import unfreeze_qgfd_alpha
+
+        n = unfreeze_qgfd_alpha(model)  # after PEFT froze the base model
+        if args.verbose:
+            print(f"[learnable_alpha] unfroze alpha_param on {n} kernels")
 
     t0 = time.time()
     trainer.train()
@@ -145,9 +156,12 @@ def run_experiment(args, seed, tag, enable_qgfd, target_alpha, warmup_steps):
 
     steps = args.steps
     loss = eval_metrics.get("eval_loss", float("nan"))
+    train_losses = [l["loss"] for l in trainer.state.log_history if "loss" in l]
+    train_loss = train_losses[-1] if train_losses else float("nan")
     return {
         "tag": tag,
         "alpha": target_alpha if enable_qgfd else 0.0,
+        "train_loss": train_loss,
         "eval_loss": loss,
         "eval_ppl": float(torch.exp(torch.tensor(loss))),
         "wall_s": round(wall_time, 1),
@@ -166,29 +180,57 @@ def main():
     ap.add_argument("--target_alpha", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--learnable_alpha", action="store_true",
+                    help="per-head alpha learned by the model (hypothesis: heads self-select diffusion)")
+    ap.add_argument("--alpha_sweep", type=str, default="",
+                    help="comma list e.g. '0,0.005,0.01,0.02,0.05' -> one run per alpha (0 = softmax baseline)")
+    ap.add_argument("--max_train_samples", type=int, default=0,
+                    help="cap training set (low-data regularizer experiment, 0 = all)")
+    ap.add_argument("--max_eval_samples", type=int, default=200)
     args = ap.parse_args()
 
     results = []
-    results.append(run_experiment(
-        args, args.seed, "softmax-baseline",
-        enable_qgfd=False, target_alpha=0.0, warmup_steps=0,
-    ))
-    results.append(run_experiment(
-        args, args.seed, "qgfd",
-        enable_qgfd=True, target_alpha=args.target_alpha, warmup_steps=args.steps,
-    ))
 
-    print("\n=== RESULT (equal budget: %d steps, seed %d) ===" % (args.steps, args.seed))
-    print(f"{'run':<18}{'alpha':<8}{'eval_loss':<12}{'eval_ppl':<12}{'wall_s':<10}{'it/s':<8}")
+    if args.alpha_sweep:
+        for a in args.alpha_sweep.split(","):
+            a = float(a.strip())
+            results.append(run_experiment(
+                args, args.seed, f"alpha-{a:g}",
+                enable_qgfd=a > 0, target_alpha=a,
+                warmup_steps=args.steps if a > 0 else 0,
+                learnable_alpha=args.learnable_alpha,
+            ))
+    else:
+        results.append(run_experiment(
+            args, args.seed, "softmax-baseline",
+            enable_qgfd=False, target_alpha=0.0, warmup_steps=0,
+        ))
+        results.append(run_experiment(
+            args, args.seed,
+            "qgfd-learn" if args.learnable_alpha else "qgfd",
+            enable_qgfd=True, target_alpha=args.target_alpha,
+            warmup_steps=args.steps,
+            learnable_alpha=args.learnable_alpha,
+        ))
+
+    print("\n=== RESULT (equal budget: %d steps, seed %d%s) ===" % (
+        args.steps, args.seed,
+        ", train samples: %d" % args.max_train_samples if args.max_train_samples else "",
+    ))
+    print(f"{'run':<18}{'alpha':<8}{'train_loss':<12}{'eval_loss':<12}{'gap':<10}{'eval_ppl':<12}{'wall_s':<10}{'it/s':<8}")
     for r in results:
+        gap = r["train_loss"] - r["eval_loss"]
         print(
-            f"{r['tag']:<18}{r['alpha']:<8.4f}{r['eval_loss']:<12.4f}"
-            f"{r['eval_ppl']:<12.2f}{r['wall_s']:<10}{r['it_per_s']:<8.3f}"
+            f"{r['tag']:<18}{r['alpha']:<8.4f}{r['train_loss']:<12.4f}"
+            f"{r['eval_loss']:<12.4f}{gap:<10.4f}{r['eval_ppl']:<12.2f}"
+            f"{r['wall_s']:<10}{r['it_per_s']:<8.3f}"
         )
-    gain = results[0]["eval_loss"] - results[1]["eval_loss"]
-    print(f"\nDelta eval_loss (softmax - QGFD): {gain:+.4f}  "
-          f"(negative => QGFD worse, positive => QGFD better)")
-    print(f"QGFD compute cost ratio: {results[1]['wall_s'] / results[0]['wall_s']:.2f}x baseline")
+    best = min(results, key=lambda r: r["eval_loss"])
+    base = results[0]
+    print(f"\nBest eval_loss: {best['tag']} ({best['eval_loss']:.4f})")
+    if len(results) > 1:
+        print(f"Delta vs baseline: {base['eval_loss'] - best['eval_loss']:+.4f} "
+              f"(positive => improvement over baseline)")
 
 
 if __name__ == "__main__":

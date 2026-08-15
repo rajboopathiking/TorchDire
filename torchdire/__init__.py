@@ -9,6 +9,7 @@ from torchdire.nn.qgfd_kernel import (
     QGFDStepCallback,
     collect_qgfd_kernels,
     register_qgfd_step_callback,
+    unfreeze_qgfd_alpha,
 )
 from torchdire.nn.qgfd import MultiHeadQGFDLayer
 from torchdire.nn.gating import QGFDMultiHeadAttention
@@ -27,6 +28,7 @@ __all__ = [
     "QGFDStepCallback",
     "collect_qgfd_kernels",
     "register_qgfd_step_callback",
+    "unfreeze_qgfd_alpha",
     "MultiHeadQGFDLayer",
     "QGFDMultiHeadAttention",
     "LlamaQGFDAttention",
