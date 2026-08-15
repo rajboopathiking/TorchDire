@@ -341,7 +341,14 @@ def patch_llama_with_qgfd(
             layer_idx = getattr(module, "layer_idx", None)
             param_sample = next(module.parameters(), None)
             device = param_sample.device if param_sample is not None else torch.device("cpu")
-            dtype = param_sample.dtype if param_sample is not None else torch.float32
+            # 4-bit QLoRA modules expose quantized params (dtype uint8);
+            # nn.Module.to only accepts floating-point dtypes, so only cast
+            # when the sample param is a float dtype.
+            dtype = (
+                param_sample.dtype
+                if param_sample is not None and param_sample.dtype.is_floating_point
+                else None
+            )
 
             new_attn = LlamaQGFDAttention(
                 config=module.config,

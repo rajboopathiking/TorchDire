@@ -80,6 +80,42 @@ def test_patch_llama_model():
     assert not torch.isnan(orig_q_proj.weight.grad).any()
 
 
+def test_patch_qlora_uint8_params():
+    # Regression: 4-bit QLoRA modules expose torch.uint8 quantized params.
+    # patch_llama_with_qgfd used to pass that dtype to nn.Module.to and crash
+    # with "nn.Module.to only accepts floating point or complex dtypes, but
+    # got desired dtype=torch.uint8". The dtype cast must be skipped.
+    config = LlamaConfig(
+        vocab_size=100,
+        hidden_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=1,
+        intermediate_size=128,
+        max_position_embeddings=128,
+        attn_implementation="eager",
+    )
+    model = LlamaForCausalLM(config)
+
+    class FakeQuantLinear(nn.Module):
+        def __init__(self, shape):
+            super().__init__()
+            self.register_parameter(
+                "weight", nn.Parameter(torch.zeros(*shape, dtype=torch.uint8), requires_grad=False)
+            )
+            self.register_buffer("quant_state", torch.zeros(1, dtype=torch.uint8))
+
+    for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+        setattr(model.model.layers[0].self_attn, name, FakeQuantLinear((2048, 2048)))
+
+    patch_llama_with_qgfd(model, diffusion_steps=2, target_alpha=0.02, warmup_steps=0, verbose=False)
+
+    attn = model.model.layers[0].self_attn
+    assert isinstance(attn, LlamaQGFDAttention)
+    assert attn.q_proj.weight.dtype == torch.uint8, "quantized weights must stay untouched"
+    assert attn.rotary_emb is not None
+
+
 def test_patch_gives_each_layer_its_own_rotary():
     # Regression: with device_map="auto" across multiple GPUs, sharing the
     # model-level rotary_emb made layers on the second GPU read cos/sin from
