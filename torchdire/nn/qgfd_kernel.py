@@ -105,6 +105,16 @@ class QGFDKernel(nn.Module):
 
     def get_alpha(self) -> Union[float, torch.Tensor]:
         """Calculate effective alpha based on step_count and max_alpha bound."""
+        if not self.training:
+            # Warmup is a training-schedule concept: at inference the
+            # diffusion runs at full strength (target_alpha / learned alpha)
+            # regardless of step_count, matching the behavior the model was
+            # trained toward. Otherwise generation with a fresh model would
+            # see step_count=0 -> alpha=0 -> diffusion silently disabled.
+            if self.learnable_alpha:
+                return torch.clamp(self.alpha_param, -self.max_alpha, self.max_alpha).view(1, -1, 1, 1)
+            return float(max(-self.max_alpha, min(self.max_alpha, self.target_alpha)))
+
         if self.warmup_steps <= 0:
             factor = 1.0
         else:

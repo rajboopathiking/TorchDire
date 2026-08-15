@@ -106,6 +106,39 @@ def test_set_step_controls_alpha():
     assert abs(kernel.get_alpha() - 0.02) < 1e-9  # capped at target_alpha
 
 
+def test_eval_uses_full_alpha_regardless_of_step():
+    # Regression: at inference step_count is 0 (the callback only runs during
+    # training), so the old logic computed alpha=0 and the diffusion was
+    # silently DISABLED during generation of a QGFD-trained model. Eval mode
+    # must use target_alpha regardless of step_count.
+    torch.manual_seed(0)
+    B, H, L, d = 2, 4, 16, 32
+    for mode in ("full", "conv"):
+        kernel = QGFDKernel(
+            diffusion_steps=2,
+            target_alpha=0.05,
+            warmup_steps=20000,
+            mode=mode,
+            kernel_size=5,
+            is_causal=True,
+        )
+        kernel.eval()  # step_count untouched, alpha must still be full
+        assert kernel.get_alpha() == 0.05
+        assert kernel.get_alpha() == 0.05  # stable across calls
+
+        scores = torch.randn(B, H, L, L)
+        K = torch.randn(B, H, L, d)
+        out = kernel(scores=scores, key_states=K, attention_mask=None)
+        assert out.shape == (B, H, L, L)
+        # diffusion is active (alpha=0.05), so P != plain softmax
+        assert not torch.allclose(out, torch.softmax(scores, dim=-1), atol=1e-6)
+
+    # train mode keeps the warmup schedule
+    kernel = QGFDKernel(diffusion_steps=2, target_alpha=0.05, warmup_steps=20000)
+    kernel.train()
+    assert kernel.get_alpha() == 0.0
+
+
 def test_callback_fires_on_both_step_hooks():
     # TRL>=1.0 skips on_step_begin in its training loop; the callback must also
     # advance the step from on_optimizer_step, otherwise the warmup schedule
