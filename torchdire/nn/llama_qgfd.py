@@ -224,11 +224,15 @@ if HAS_LLAMA:
 
             # --- QGFD ---
             if hasattr(self, "qgfd"):
-                attn_weights = self.qgfd(
+                p = self.qgfd(
                     scores=attn_weights.to(torch.float32),
                     key_states=key_states,
                     attention_mask=None,
                 ).to(query_states.dtype)
+                assert p.dim() == 4 and p.shape == attn_weights.shape, (
+                    f"QGFD parity violation: scores={tuple(attn_weights.shape)}, p={tuple(p.shape)}"
+                )
+                attn_weights = p
             else:
                 # upcast attention to fp32
                 attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
