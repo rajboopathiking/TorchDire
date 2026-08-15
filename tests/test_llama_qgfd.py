@@ -80,6 +80,43 @@ def test_patch_llama_model():
     assert not torch.isnan(orig_q_proj.weight.grad).any()
 
 
+def test_patch_gives_each_layer_its_own_rotary():
+    # Regression: with device_map="auto" across multiple GPUs, sharing the
+    # model-level rotary_emb made layers on the second GPU read cos/sin from
+    # the first GPU -> RuntimeError "Expected all tensors to be on the same
+    # device, but found at least two devices, cuda:0 and cuda:1!" in
+    # apply_rotary_pos_emb. Each patched layer must own a local rotary copy on
+    # its own device.
+    config = LlamaConfig(
+        vocab_size=100,
+        hidden_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=2,
+        intermediate_size=128,
+        max_position_embeddings=128,
+        attn_implementation="eager",
+    )
+    model = LlamaForCausalLM(config)
+    model_rotary = getattr(model.model, "rotary_emb", None)
+    patch_llama_with_qgfd(model, diffusion_steps=2, target_alpha=0.02, warmup_steps=0, verbose=False)
+
+    layer_rotaries = []
+    for layer in model.model.layers:
+        attn = layer.self_attn
+        assert isinstance(attn, LlamaQGFDAttention)
+        if model_rotary is not None:
+            assert attn.rotary_emb is not model_rotary, "layer must not share the model-level rotary"
+        layer_rotaries.append(attn.rotary_emb)
+    assert layer_rotaries[0] is not layer_rotaries[1], "each layer must own a distinct rotary copy"
+
+    # sanity: forward+backward still fine with per-layer copies
+    input_ids = torch.randint(0, 100, (2, 16))
+    loss = model(input_ids, labels=input_ids).loss
+    loss.backward()
+    assert torch.isfinite(loss)
+
+
 def test_llama_qgfd_attribute_preservation():
     config = LlamaConfig(
         vocab_size=100,

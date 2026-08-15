@@ -1,3 +1,4 @@
+import copy
 import math
 import torch
 import torch.nn as nn
@@ -373,10 +374,16 @@ def patch_llama_with_qgfd(
             new_attn.k_proj = module.k_proj
             new_attn.v_proj = module.v_proj
             new_attn.o_proj = module.o_proj
-            if hasattr(module, "rotary_emb"):
-                new_attn.rotary_emb = module.rotary_emb
-            elif model_rotary is not None:
-                new_attn.rotary_emb = model_rotary
+            # Give each patched layer its OWN rotary cache on the layer's device.
+            # In transformers>=5 the rotary embedding lives once at the model
+            # level and is shared by every layer; with device_map="auto" across
+            # multiple GPUs, layers dispatched to GPU 1 would read cos/sin from
+            # the model-level module on GPU 0 and crash with
+            # "Expected all tensors to be on the same device, but found at least
+            # two devices, cuda:0 and cuda:1!" in apply_rotary_pos_emb.
+            src_rotary = module.rotary_emb if hasattr(module, "rotary_emb") else model_rotary
+            if src_rotary is not None:
+                new_attn.rotary_emb = copy.deepcopy(src_rotary).to(device=device, dtype=dtype)
 
             parent_name, _, child_name = name.rpartition(".")
             if parent_name:
