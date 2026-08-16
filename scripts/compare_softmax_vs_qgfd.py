@@ -63,10 +63,10 @@ class Config:
     target_alpha: float = 0.1
     warmup_steps: int = 30  # steps over which alpha ramps 0 -> target_alpha
     diffusion_steps: int = 3
-    batch_size: int = 2
+    batch_size: int = 1
     grad_accum: int = 4
-    lr: float = 1e-3
-    max_length: int = 256
+    lr: float = 2e-4
+    max_length: int = 512
     verbose: bool = True
     tag: str = "run"
     learnable_alpha: bool = False  # per-head alpha learned by the model
