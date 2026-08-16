@@ -41,7 +41,12 @@ from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from trl import SFTConfig, SFTTrainer
 
-from torchdire import patch_llama_with_qgfd, register_qgfd_step_callback
+from torchdire import (
+    QGFDKernel,
+    dump_learned_alphas,
+    patch_llama_with_qgfd,
+    register_qgfd_step_callback,
+)
 
 MODEL_ID = "42dot/42dot_LLM-SFT-1.3B"
 OUT_ROOT = "./42dot-ab"
@@ -165,6 +170,11 @@ def run_experiment(args, seed, tag, enable_qgfd, target_alpha, warmup_steps, lea
     wall_time = time.time() - t0
     eval_metrics = trainer.evaluate()
 
+    if learnable_alpha and args.dump_alphas and _main_process():
+        out = dump_learned_alphas(model, args.dump_alphas)
+        if args.verbose:
+            print(f"[learnable_alpha] dumped {len(out)} layers to {args.dump_alphas}")
+
     steps = args.steps
     loss = eval_metrics.get("eval_loss", float("nan"))
     train_losses = [l["loss"] for l in trainer.state.log_history if "loss" in l]
@@ -197,7 +207,10 @@ def main():
                     help="comma list e.g. '0,0.005,0.01,0.02,0.05' -> one run per alpha (0 = softmax baseline)")
     ap.add_argument("--max_train_samples", type=int, default=0,
                     help="cap training set (low-data regularizer experiment, 0 = all)")
-    ap.add_argument("--max_eval_samples", type=int, default=200)
+    ap.add_argument("--max_eval_samples", type=int, default=0,
+                    help="cap eval set for lower variance (0 = full test split)")
+    ap.add_argument("--dump_alphas", type=str, default="",
+                    help="after training, write learned per-head alphas to this JSON (learnable_alpha only)")
     args = ap.parse_args()
 
     results = []

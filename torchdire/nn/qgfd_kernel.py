@@ -464,6 +464,34 @@ def collect_qgfd_kernels(model) -> list:
     return kernels
 
 
+def dump_learned_alphas(model, path) -> dict:
+    """Save each QGFDKernel's learned per-head alpha values to JSON.
+
+    For the per-head selectivity hypothesis this shows which heads/layers kept
+    diffusion (|alpha| > 0) after training vs collapsed toward softmax (alpha
+    ~ 0). Keys are the layer index parsed from the module path (e.g.
+    model.layers.4.self_attn.qgfd -> "4"); any kernel without a layer index in
+    its name uses the full module path as key.
+    """
+    import json
+    import re
+
+    out = {}
+    for name, module in model.named_modules():
+        if isinstance(module, QGFDKernel) and module.learnable_alpha:
+            m = re.search(r"layers\.(\d+)", name)
+            key = m.group(1) if m else name
+            alphas = [float(a) for a in module.alpha_param.detach().cpu()]
+            out[key] = {
+                "mean": sum(alphas) / len(alphas),
+                "nonzero": sum(1.0 for a in alphas if abs(a) > 1e-4),
+                "head_alphas": alphas,
+            }
+    with open(path, "w") as f:
+        json.dump(out, f, indent=2)
+    return out
+
+
 def unfreeze_qgfd_alpha(model) -> int:
     """Make learnable per-head alpha params trainable (requires_grad=True).
 

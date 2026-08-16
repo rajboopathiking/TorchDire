@@ -8,6 +8,7 @@ from torchdire.nn.qgfd_kernel import (
     QGFDKernel,
     QGFDStepCallback,
     collect_qgfd_kernels,
+    dump_learned_alphas,
     register_qgfd_step_callback,
     unfreeze_qgfd_alpha,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "QGFDKernel",
     "QGFDStepCallback",
     "collect_qgfd_kernels",
+    "dump_learned_alphas",
     "register_qgfd_step_callback",
     "unfreeze_qgfd_alpha",
     "MultiHeadQGFDLayer",

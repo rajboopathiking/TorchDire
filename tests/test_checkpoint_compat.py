@@ -1,4 +1,5 @@
 import torch
+import pytest
 from torchdire.nn.qgfd_kernel import QGFDKernel
 from torchdire.nn.qgfd import MultiHeadQGFDLayer
 
@@ -259,6 +260,44 @@ def test_warning_step_control_requires_no_callback():
                 "must stay quiet when a callback is registered"
     finally:
         KClass._qgfd_callback_registered = False
+
+
+def test_dump_learned_alphas_json():
+    import json
+    import tempfile
+
+    from torchdire import dump_learned_alphas, patch_llama_with_qgfd
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=100,
+        hidden_size=64,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=2,
+        intermediate_size=128,
+        max_position_embeddings=128,
+        attn_implementation="eager",
+    )
+    model = LlamaForCausalLM(config)
+    patch_llama_with_qgfd(
+        model, diffusion_steps=2, target_alpha=0.05, warmup_steps=0,
+        learnable_alpha=True, verbose=False,
+    )
+    # heads 0..2 of layer 1 stay, head 3 collapses toward softmax
+    layer1 = model.model.layers[1].self_attn.qgfd
+    with torch.no_grad():
+        layer1.alpha_param.copy_(torch.tensor([0.05, 0.04, 0.03, 0.0]))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = f"{tmp}/alphas.json"
+        out = dump_learned_alphas(model, path)
+        assert set(out.keys()) == {"0", "1"}
+        assert out["1"]["mean"] == pytest.approx(0.03, abs=1e-6)
+        assert out["1"]["nonzero"] == 3
+        assert out["1"]["head_alphas"] == pytest.approx([0.05, 0.04, 0.03, 0.0], abs=1e-6)
+        with open(path) as f:
+            assert json.load(f) == out
 
 
 def test_mixed_dtype_scores_fp32_keys_bf16():
