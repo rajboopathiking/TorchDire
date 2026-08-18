@@ -130,7 +130,11 @@ class SafeWrappedAttention(nn.Module):
             full_fallback_mode=full_fallback_mode,
             **qgfd_kwargs,
         )
-        object.__setattr__(self, "qgfd", qgfd)
+        # Register the QGFD layer as a proper submodule (NOT object.__setattr__:
+        # a plain attribute is invisible to .eval()/.to()/state_dict() — the
+        # kernel would stay in training mode during inference, weights would
+        # never move to GPU, and checkpoints would lose every QGFD parameter).
+        self.add_module("qgfd", qgfd)
         object.__setattr__(self, "num_heads", num_heads)
         object.__setattr__(self, "embed_dim", embed_dim)
         object.__setattr__(self, "head_dim", proj_dim // num_heads)
@@ -250,7 +254,7 @@ class SafeWrappedAttention(nn.Module):
             ("out_proj", "out_proj"),
         ]:
             if hasattr(orig_mod, src_name):
-                setattr(self, src_name, getattr(self.qgfd, dst_name))
+                self.add_module(src_name, getattr(self.qgfd, dst_name))
 
         # All weights have been transferred into self.qgfd; drop the original
         # module so its weights are freed instead of doubling memory.
@@ -297,6 +301,8 @@ class SafeWrappedAttention(nn.Module):
         **kwargs,
     ):
         p_kv = past_key_value if past_key_value is not None else layer_past
+        if p_kv is None:
+            p_kv = kwargs.get("past_key_values")  # newer transformers kwarg name
 
         # SDPA-style attention layers receive attention_mask=None from the
         # model because they build their causal mask internally; the QGFD
@@ -349,11 +355,17 @@ class SafeWrappedAttention(nn.Module):
             attn_output = self.qgfd.out_proj(attn_output_raw)
 
             # Return in the original module's tuple layout (see __init__).
-            if getattr(self, "_return_layout", "cond") == "w3":
+            # "cond" mirrors GPT-2 exactly: 2 values unless attentions were
+            # requested — newer transformers blocks unpack `attn_output, _ =`
+            # positionally and crash on a 3-tuple.
+            layout = getattr(self, "_return_layout", "cond")
+            if layout == "w3":
                 return attn_output, (p if output_attentions else None), present
-            if getattr(self, "_return_layout", "cond") == "always2":
+            if layout == "always2":
                 return attn_output, (p if output_attentions else None)
-            return attn_output, present, (p if output_attentions else None)
+            if output_attentions:
+                return attn_output, present, p
+            return attn_output, present
 
         kv_input = key_value_states if key_value_states is not None else hidden_states
 
@@ -390,11 +402,14 @@ class SafeWrappedAttention(nn.Module):
         else:
             attn_weights = None
         # Return in the original module's tuple layout (see __init__).
-        if getattr(self, "_return_layout", "cond") == "w3":
+        layout = getattr(self, "_return_layout", "cond")
+        if layout == "w3":
             return attn_output, attn_weights, present
-        if getattr(self, "_return_layout", "cond") == "always2":
+        if layout == "always2":
             return attn_output, attn_weights
-        return attn_output, present, attn_weights
+        if output_attentions:
+            return attn_output, present, attn_weights
+        return attn_output, present
 
 
 def _get_attr_or_index(parent, part):
