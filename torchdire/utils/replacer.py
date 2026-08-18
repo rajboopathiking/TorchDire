@@ -342,7 +342,11 @@ class SafeWrappedAttention(nn.Module):
                 Lk = p_kv[0].shape[2] + Lq
                 past_len = Lk - Lq
             elif modern_cache:
-                past_len = p_kv.get_seq_length()  # before this step's update
+                # Per-layer length: get_seq_length() without an index
+                # returns the cache-wide maximum, so after an earlier layer
+                # updated the shared cache this step, later layers would
+                # overestimate their own past length.
+                past_len = p_kv.get_seq_length(self.layer_idx)
                 Lk = past_len + Lq
             else:
                 Lk = Lq
