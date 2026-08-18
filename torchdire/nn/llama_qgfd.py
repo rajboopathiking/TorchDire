@@ -25,20 +25,11 @@ from torchdire.nn.qgfd_kernel import QGFDKernel
 _LLAMA_ATTN_RETURNS_2_TUPLE = False
 if HAS_LLAMA:
     try:
-        import transformers
-        v_parts = [int(p) for p in transformers.__version__.split(".")[:2] if p.isdigit()]
-        if len(v_parts) >= 2 and tuple(v_parts) >= (4, 43):
+        import inspect
+        from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+        decoder_src = inspect.getsource(LlamaDecoderLayer.forward)
+        if "hidden_states, _ =" in decoder_src or "hidden_states, self_attn_weights =" in decoder_src:
             _LLAMA_ATTN_RETURNS_2_TUPLE = True
-        else:
-            import inspect
-            from transformers.models.llama.modeling_llama import LlamaDecoderLayer
-            decoder_src = inspect.getsource(LlamaDecoderLayer.forward)
-            if "hidden_states, _ =" in decoder_src or "hidden_states, self_attn_weights =" in decoder_src:
-                _LLAMA_ATTN_RETURNS_2_TUPLE = True
-            else:
-                attn_src = inspect.getsource(LlamaAttention.forward)
-                if "return attn_output, attn_weights\n" in attn_src or "return attn_output, attn_weights\r\n" in attn_src:
-                    _LLAMA_ATTN_RETURNS_2_TUPLE = True
     except Exception:
         pass
 
@@ -56,10 +47,10 @@ if HAS_LLAMA:
             self,
             config: LlamaConfig,
             layer_idx: Optional[int] = None,
-            diffusion_steps: int = 4,
-            target_alpha: float = 0.02,
-            warmup_steps: int = 20000,
-            early_stop_eps: float = 1e-5,
+            diffusion_steps: int = 1,
+            target_alpha: float = 0.05,
+            warmup_steps: int = 0,
+            early_stop_eps: float = 0.0,
             detach_P: bool = False,
             temp: float = 1.0,
             mode: str = "full",
@@ -67,7 +58,7 @@ if HAS_LLAMA:
             enable_qgfd: bool = True,
             max_alpha: float = 0.10,
             max_full_seq_len: int = 512,
-            full_fallback_mode: str = "disable",
+            full_fallback_mode: str = "conv",
             mask_threshold: float = -1e4,
             debug: bool = False,
             learnable_alpha: bool = False,
@@ -281,8 +272,8 @@ else:
 
 def patch_llama_with_qgfd(
     model: nn.Module,
-    diffusion_steps: int = 4,
-    target_alpha: float = 0.02,
+    diffusion_steps: int = 1,
+    target_alpha: float = 0.05,
     warmup_steps: int = 0,
     verbose: bool = True,
     auto_eval: bool = True,
@@ -292,6 +283,12 @@ def patch_llama_with_qgfd(
     In-place replace all LlamaAttention layers in a model with LlamaQGFDAttention.
     Reuses existing q_proj, k_proj, v_proj, o_proj, and rotary_emb submodules so that
     LoRA/QLoRA adapters and original projection weights remain fully intact.
+
+    Defaults follow the configuration validated by QGFD_Sanity_Checks:
+    diffusion_steps=1, target_alpha=0.05, warmup_steps=0 (alpha starts at full
+    strength immediately — no silent softmax period), full_fallback_mode="conv"
+    (linear-cost local diffusion beyond max_full_seq_len instead of silently
+    disabling QGFD at long context).
     """
     if not HAS_LLAMA:
         raise RuntimeError("Hugging Face transformers (LlamaAttention) is not installed.")
@@ -335,6 +332,8 @@ def patch_llama_with_qgfd(
                 module.qgfd.diffusion_steps = diffusion_steps
                 module.qgfd.target_alpha = target_alpha
                 module.qgfd.warmup_steps = warmup_steps
+                module.qgfd.max_full_seq_len = int(qgfd_kwargs.get("max_full_seq_len", 512))
+                module.qgfd.full_fallback_mode = qgfd_kwargs.get("full_fallback_mode", "conv")
                 updated_count += 1
                 continue
 

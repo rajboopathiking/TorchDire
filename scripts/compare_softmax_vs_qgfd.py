@@ -38,11 +38,12 @@ import time
 if "LOCAL_RANK" not in os.environ and "RANK" not in os.environ:
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
+import gc
 import torch
 from dataclasses import dataclass
 from datasets import load_dataset
 from peft import LoraConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, set_seed
 from trl import SFTConfig, SFTTrainer
 
 from torchdire import (
@@ -127,22 +128,27 @@ def _main_process() -> bool:
 
 
 def run_experiment(cfg, seed, tag, enable_qgfd, target_alpha, warmup_steps, learnable_alpha=False):
-    torch.manual_seed(seed)
+    set_seed(seed)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
-        device_map={"": 0},
-        quantization_config=BitsAndBytesConfig(
+    load_kwargs = dict(
+        low_cpu_mem_usage=True,
+    )
+    if torch.cuda.is_available():
+        load_kwargs["device_map"] = {"": 0}
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype="bfloat16",
-        ),
-        low_cpu_mem_usage=True,
+        )
+
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID,
+        **load_kwargs,
     )
     model.config.use_cache = False
 
@@ -171,7 +177,7 @@ def run_experiment(cfg, seed, tag, enable_qgfd, target_alpha, warmup_steps, lear
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
     )
 
     trainer = SFTTrainer(
@@ -181,6 +187,9 @@ def run_experiment(cfg, seed, tag, enable_qgfd, target_alpha, warmup_steps, lear
         args=SFTConfig(**make_sft_config_kwargs(cfg, seed)),
         peft_config=lora_config,
     )
+    if cfg.verbose and _main_process():
+        trainer.model.print_trainable_parameters()
+
     register_qgfd_step_callback(trainer, model)
     if learnable_alpha:
         from torchdire import unfreeze_qgfd_alpha
@@ -203,7 +212,8 @@ def run_experiment(cfg, seed, tag, enable_qgfd, target_alpha, warmup_steps, lear
     loss = eval_metrics.get("eval_loss", float("nan"))
     train_losses = [l["loss"] for l in trainer.state.log_history if "loss" in l]
     train_loss = train_losses[-1] if train_losses else float("nan")
-    return {
+
+    res = {
         "tag": tag,
         "alpha": target_alpha if enable_qgfd else 0.0,
         "train_loss": train_loss,
@@ -212,6 +222,13 @@ def run_experiment(cfg, seed, tag, enable_qgfd, target_alpha, warmup_steps, lear
         "wall_s": round(wall_time, 1),
         "it_per_s": round(steps / wall_time, 3),
     }
+
+    del model, trainer
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return res
 
 
 def main():

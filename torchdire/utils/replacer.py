@@ -1,9 +1,48 @@
 import gc
+import inspect
+import math
 import traceback
 import torch
 import torch.nn as nn
 from torchdire.nn.qgfd import MultiHeadQGFDLayer
 from torchdire.nn.llama_qgfd import HAS_LLAMA, LlamaAttention, patch_llama_with_qgfd
+
+try:  # GPT-2 uses transformers' Conv1D (weights stored [in, out], applied as x @ W^T)
+    from transformers.pytorch_utils import Conv1D as _HFConv1D
+except Exception:
+    _HFConv1D = None
+
+
+def _is_conv1d(mod: nn.Module) -> bool:
+    return _HFConv1D is not None and isinstance(mod, _HFConv1D) or type(mod).__name__ == "Conv1D"
+
+# Plain config-like attributes copied from the original attention module onto
+# the wrapper so HF parent layers keep reading the values they expect.
+# NEVER copy callables or nn.Module/nn.Parameter values: a copied `forward`
+# bound method in the instance __dict__ shadows SafeWrappedAttention.forward
+# and silently disables QGFD (the original softmax path runs instead), and
+# copied submodules are unregistered plain attributes (not moved by .to(),
+# not part of state_dict).
+_COPYABLE_ATTRS = (
+    "n_head",
+    "num_heads",
+    "num_attention_heads",
+    "num_key_value_heads",
+    "head_dim",
+    "hidden_size",
+    "embed_dim",
+    "d_model",
+    "is_causal",
+    "causal",
+    "is_decoder",
+    "attention_dropout",
+    "attn_dropout",
+    "max_position_embeddings",
+    "layer_idx",
+    "scale_attn_weights",
+    "use_cache",
+    "config",
+)
 
 
 class SafeWrappedAttention(nn.Module):
@@ -18,11 +57,13 @@ class SafeWrappedAttention(nn.Module):
         self,
         orig_mod: nn.Module,
         QGFDLayerClass=MultiHeadQGFDLayer,
-        diffusion_steps: int = 2,
-        target_alpha: float = 0.02,
+        diffusion_steps: int = 1,
+        target_alpha: float = 0.05,
         warmup_steps: int = 0,
         kernel_size: int = 5,
         early_stop_eps: float = 0.0,
+        max_full_seq_len: int = 512,
+        full_fallback_mode: str = "conv",
         **qgfd_kwargs,
     ):
         super().__init__()
@@ -45,20 +86,36 @@ class SafeWrappedAttention(nn.Module):
                 f"Cannot infer embed_dim for SafeWrappedAttention on {orig_mod.__class__.__name__}"
             )
 
-        # Infer num_heads
-        num_heads = getattr(orig_mod, "n_heads", None) or getattr(orig_mod, "num_heads", None)
-        if num_heads is None:
-            q_proj = getattr(orig_mod, "q_proj", None) or getattr(orig_mod, "q", None)
-            if q_proj is not None and hasattr(q_proj, "weight"):
-                q_out_dim = q_proj.weight.shape[0]
-                for h in [32, 24, 16, 12, 8, 4, 2]:
-                    if q_out_dim % h == 0:
-                        num_heads = h
-                        break
+        # Infer num_heads. Prefer explicit module attributes (GPT-2 uses n_head,
+        # OPT uses num_heads), then config, then the q-projection divisor heuristic.
+        num_heads = (
+            getattr(orig_mod, "n_head", None)
+            or getattr(orig_mod, "num_heads", None)
+            or getattr(orig_mod, "num_attention_heads", None)
+        )
+        if num_heads is None and hasattr(orig_mod, "config"):
+            num_heads = (
+                getattr(orig_mod.config, "num_attention_heads", None)
+                or getattr(orig_mod.config, "num_heads", None)
+                or getattr(orig_mod.config, "n_head", None)
+            )
+        q_proj = getattr(orig_mod, "q_proj", None) or getattr(orig_mod, "q", None)
+        if num_heads is None and q_proj is not None and hasattr(q_proj, "weight"):
+            q_out_dim = q_proj.weight.shape[0]
+            for h in [32, 24, 16, 12, 8, 6, 4, 2]:
+                if q_out_dim % h == 0:
+                    num_heads = h
+                    break
         if num_heads is None:
             num_heads = 8
 
+        # Infer proj_dim from the actual Q projection output width so the
+        # head reshape matches the pretrained weights (avoids head scrambling).
         proj_dim = embed_dim
+        if q_proj is not None and hasattr(q_proj, "weight"):
+            q_out_dim = q_proj.weight.shape[0]
+            if q_out_dim % num_heads == 0:
+                proj_dim = q_out_dim
 
         qgfd = QGFDLayerClass(
             embed_dim=embed_dim,
@@ -69,6 +126,8 @@ class SafeWrappedAttention(nn.Module):
             warmup_steps=warmup_steps,
             kernel_size=kernel_size,
             early_stop_eps=early_stop_eps,
+            max_full_seq_len=max_full_seq_len,
+            full_fallback_mode=full_fallback_mode,
             **qgfd_kwargs,
         )
         object.__setattr__(self, "qgfd", qgfd)
@@ -76,13 +135,19 @@ class SafeWrappedAttention(nn.Module):
         object.__setattr__(self, "embed_dim", embed_dim)
         object.__setattr__(self, "head_dim", proj_dim // num_heads)
 
-        # Copy original attributes
-        for attr in dir(orig_mod):
-            if attr.startswith("_") or attr in ("qgfd", "_orig", "num_heads", "embed_dim", "head_dim"):
+        # Copy only whitelisted config-like attributes (see _COPYABLE_ATTRS).
+        # Copying everything from dir(orig_mod) put `forward` (and q_proj /
+        # k_proj / v_proj / out_proj) into this instance's __dict__, so
+        # wrapper.forward resolved to the ORIGINAL module's bound method and
+        # QGFD never ran. The projection modules are transferred into
+        # self.qgfd below instead.
+        for attr in _COPYABLE_ATTRS:
+            if not hasattr(orig_mod, attr):
                 continue
             try:
                 val = getattr(orig_mod, attr)
-                object.__setattr__(self, attr, val)
+                if not callable(val):
+                    object.__setattr__(self, attr, val)
             except Exception:
                 pass
 
@@ -116,7 +181,14 @@ class SafeWrappedAttention(nn.Module):
                 w = orig_mod.c_proj.weight.data
                 b = orig_mod.c_proj.bias.data if getattr(orig_mod.c_proj, "bias", None) is not None else None
                 out_w = self.qgfd.out_proj.weight
-                if w.shape == out_w.shape:
+                # GPT-2's Conv1D stores weights as [in, out] and computes
+                # x @ W^T; nn.Linear stores [out, in] and computes x @ W.
+                # Square weights are shape-ambiguous, so use the module class
+                # to pick the orientation — a blind shape check silently
+                # copies the transposed linear map and corrupts every layer.
+                if _is_conv1d(orig_mod.c_proj):
+                    out_w.copy_(w.T)
+                elif w.shape == out_w.shape:
                     out_w.copy_(w)
                 elif w.T.shape == out_w.shape:
                     out_w.copy_(w.T)
@@ -147,6 +219,71 @@ class SafeWrappedAttention(nn.Module):
 
         self.__class__.__name__ = orig_mod.__class__.__name__
 
+        # Return-tuple layout differs across HF attention classes and the
+        # callers unpack positionally, so the wrapper must mirror the
+        # original module's convention:
+        #   "w3":     always 3, order (output, attn_weights, present)
+        #            (OPT, Bloom, GPT-NeoX, T5, GPT-J — attn_weights=None
+        #            when not requested)
+        #   "cond":   (output, present) or (output, present, attn_weights)
+        #            depending on output_attentions (GPT-2, Llama, ...)
+        #   "always2":(output, attn_weights) always (DummyAttention, ...)
+        _cls_name = type(orig_mod).__name__
+        if any(t in _cls_name for t in ("OPT", "Bloom", "NeoX", "T5", "GPTJ")):
+            _layout = "w3"
+        else:
+            try:
+                _src = inspect.getsource(orig_mod.forward)
+                _layout = "cond" if "output_attentions" in _src else "always2"
+            except Exception:
+                _layout = "cond"
+        object.__setattr__(self, "_return_layout", _layout)
+
+        # Register the original projection names as aliases of the transferred
+        # QGFD projections (SHARED weights, not duplicated), so pretrained
+        # state dicts keep their original keys (q_proj/k_proj/v_proj/out_proj)
+        # and load unchanged into the wrapped model.
+        for src_name, dst_name in [
+            ("q_proj", "q_proj"),
+            ("k_proj", "k_proj"),
+            ("v_proj", "v_proj"),
+            ("out_proj", "out_proj"),
+        ]:
+            if hasattr(orig_mod, src_name):
+                setattr(self, src_name, getattr(self.qgfd, dst_name))
+
+        # All weights have been transferred into self.qgfd; drop the original
+        # module so its weights are freed instead of doubling memory.
+        object.__delattr__(self, "_orig")
+
+    def _is_causal_self_attn(self) -> bool:
+        causal = getattr(self, "is_causal", None)
+        if causal is None:
+            causal = getattr(self, "causal", None)
+        if causal is None:
+            cfg = getattr(self, "config", None)
+            if cfg is not None:
+                causal = bool(getattr(cfg, "is_decoder", False))
+        return bool(causal)
+
+    @staticmethod
+    def _causal_mask_4d(Lq: int, Lk: int, past_len: int, device, dtype) -> torch.Tensor | None:
+        """Additive [1, 1, Lq, Lk] causal mask (finfo.min on future keys).
+
+        past_len is the number of cached keys already present; the absolute
+        position of query i is past_len + i, which may attend keys 0..past+i.
+        """
+        if Lk <= past_len + 1 and Lq == 1:
+            return None
+        q_abs = torch.arange(past_len, past_len + Lq, device=device)
+        k_abs = torch.arange(Lk, device=device)
+        future = k_abs[None, :] > q_abs[:, None]  # [Lq, Lk]
+        if not future.any():
+            return None
+        mask = torch.zeros(Lq, Lk, device=device, dtype=dtype)
+        mask.masked_fill_(future, torch.finfo(dtype).min)
+        return mask[None, None, :, :]
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -161,10 +298,42 @@ class SafeWrappedAttention(nn.Module):
     ):
         p_kv = past_key_value if past_key_value is not None else layer_past
 
+        # SDPA-style attention layers receive attention_mask=None from the
+        # model because they build their causal mask internally; the QGFD
+        # kernel does not, so without this the softmax (and the diffusion)
+        # would see future keys and the model collapses to near-uniform
+        # logits. Only self-attention over a causal model gets the mask,
+        # and it is ANDed with any caller-supplied mask, mirroring the
+        # SDPA semantics of is_causal combined with the attention mask.
+        eff_mask = attention_mask
+        if key_value_states is None and self._is_causal_self_attn():
+            Lq = hidden_states.shape[1]
+            if p_kv is not None and isinstance(p_kv, (list, tuple)) and len(p_kv) == 2:
+                Lk = p_kv[0].shape[2] + Lq
+                past_len = Lk - Lq
+            else:
+                Lk = Lq
+                past_len = 0
+            if eff_mask is None:
+                eff_mask = self._causal_mask_4d(Lq, Lk, past_len, hidden_states.device, hidden_states.dtype)
+            elif eff_mask.dtype == torch.bool:
+                causal_bool = None
+                cm = self._causal_mask_4d(Lq, Lk, past_len, hidden_states.device, torch.bool)
+                if cm is not None:
+                    causal_bool = cm.bool()
+                if causal_bool is not None:
+                    eff_mask = eff_mask & causal_bool
+            else:
+                causal_add = self._causal_mask_4d(Lq, Lk, past_len, hidden_states.device, eff_mask.dtype)
+                if causal_add is not None:
+                    eff_mask = eff_mask + causal_add
+
         if p_kv is not None and isinstance(p_kv, (list, tuple)) and len(p_kv) == 2:
             prev_k, prev_v = p_kv
-            k_new = self.qgfd.k_proj(hidden_states).view(hidden_states.shape[0], hidden_states.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
-            v_new = self.qgfd.v_proj(hidden_states).view(hidden_states.shape[0], hidden_states.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
+            k_out = self.qgfd.k_proj.weight.shape[0]
+            kv_heads = k_out // self.head_dim
+            k_new = self.qgfd.k_proj(hidden_states).view(hidden_states.shape[0], hidden_states.shape[1], kv_heads, self.head_dim).transpose(1, 2)
+            v_new = self.qgfd.v_proj(hidden_states).view(hidden_states.shape[0], hidden_states.shape[1], kv_heads, self.head_dim).transpose(1, 2)
 
             full_k = torch.cat([prev_k, k_new], dim=2)
             full_v = torch.cat([prev_v, v_new], dim=2)
@@ -173,31 +342,59 @@ class SafeWrappedAttention(nn.Module):
             Q = self.qgfd.q_proj(hidden_states).view(hidden_states.shape[0], hidden_states.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
             scores = torch.einsum("bhqd,bhkd->bhqk", Q, full_k) / math.sqrt(self.head_dim)
 
-            p = self.qgfd.kernel(scores=scores, key_states=full_k, attention_mask=attention_mask)
+            p = self.qgfd.kernel(scores=scores, key_states=full_k, attention_mask=eff_mask)
 
             attn_output_raw = torch.einsum("bhqk,bhkd->bhqd", p, full_v)
             attn_output_raw = attn_output_raw.transpose(1, 2).contiguous().view(hidden_states.shape[0], hidden_states.shape[1], self.embed_dim)
             attn_output = self.qgfd.out_proj(attn_output_raw)
 
-            if output_attentions:
-                return attn_output, present, p
-            return attn_output, present
+            # Return in the original module's tuple layout (see __init__).
+            if getattr(self, "_return_layout", "cond") == "w3":
+                return attn_output, (p if output_attentions else None), present
+            if getattr(self, "_return_layout", "cond") == "always2":
+                return attn_output, (p if output_attentions else None)
+            return attn_output, present, (p if output_attentions else None)
 
         kv_input = key_value_states if key_value_states is not None else hidden_states
 
         attn_out_tuple = self.qgfd(
             hidden_states,
             kv=kv_input,
-            attention_mask=attention_mask,
+            attention_mask=eff_mask,
             output_attentions=output_attentions,
         )
         attn_output = attn_out_tuple[0]
         attn_probs = attn_out_tuple[1] if output_attentions and len(attn_out_tuple) > 1 else None
 
+        # The original attention returns a KV cache whenever use_cache=True,
+        # including the first (prefill) pass; returning None here poisons the
+        # HF cache tuple (next step: past_key_values[0][0] -> NoneType error).
+        # OPT goes further: OPTAttention has no use_cache flag and
+        # unconditionally returns (key_states, value_states) as the cache
+        # when self.is_decoder — even for prefill and even when the caller
+        # did not request caching.
+        present = None
+        if use_cache or getattr(self, "is_decoder", False):
+            k_out = self.qgfd.k_proj.weight.shape[0]
+            kv_heads = k_out // self.head_dim
+            k_new = self.qgfd.k_proj(hidden_states).view(
+                hidden_states.shape[0], hidden_states.shape[1], kv_heads, self.head_dim
+            ).transpose(1, 2)
+            v_new = self.qgfd.v_proj(hidden_states).view(
+                hidden_states.shape[0], hidden_states.shape[1], kv_heads, self.head_dim
+            ).transpose(1, 2)
+            present = (k_new, v_new)
+
         if output_attentions:
             attn_weights = attn_probs.mean(dim=1) if (attn_probs is not None and attn_probs.dim() == 4) else attn_probs
-            return attn_output, None, attn_weights
-        return attn_output, None
+        else:
+            attn_weights = None
+        # Return in the original module's tuple layout (see __init__).
+        if getattr(self, "_return_layout", "cond") == "w3":
+            return attn_output, attn_weights, present
+        if getattr(self, "_return_layout", "cond") == "always2":
+            return attn_output, attn_weights
+        return attn_output, present, attn_weights
 
 
 def _get_attr_or_index(parent, part):
@@ -221,7 +418,7 @@ def _set_submodule(root, dotted_name, new_mod):
 
 
 def is_leaf_attention(mod: nn.Module) -> bool:
-    if hasattr(mod, "qgfd") and hasattr(mod, "_orig"):
+    if hasattr(mod, "qgfd"):
         return False
 
     clsname = mod.__class__.__name__.lower()
@@ -241,11 +438,13 @@ def is_leaf_attention(mod: nn.Module) -> bool:
 def wrap_model_with_qgfd(
     model: nn.Module,
     QGFDLayerClass=MultiHeadQGFDLayer,
-    diffusion_steps: int = 2,
-    target_alpha: float = 0.02,
+    diffusion_steps: int = 1,
+    target_alpha: float = 0.05,
     warmup_steps: int = 0,
     kernel_size: int = 5,
     early_stop_eps: float = 0.0,
+    max_full_seq_len: int = 512,
+    full_fallback_mode: str = "conv",
     verbose: bool = True,
     auto_eval: bool = True,
     **qgfd_kwargs,
@@ -254,6 +453,12 @@ def wrap_model_with_qgfd(
     Recursively replaces attention modules in model with QGFD.
     For Llama models, uses zero-overhead subclassing (patch_llama_with_qgfd).
     For other architectures, uses SafeWrappedAttention.
+
+    Defaults match the configuration validated by QGFD_Sanity_Checks
+    (diffusion_steps=1, target_alpha=0.05, no warmup): stronger diffusion
+    (alpha=0.1, steps=3) degrades eval loss vs softmax while only adding cost.
+    max_full_seq_len=512 + full_fallback_mode="conv" keeps QGFD active at long
+    context with linear-cost local diffusion instead of silently disabling it.
     """
     gc.collect()
 
@@ -283,6 +488,8 @@ def wrap_model_with_qgfd(
             warmup_steps=warmup_steps,
             kernel_size=kernel_size,
             early_stop_eps=early_stop_eps,
+            max_full_seq_len=max_full_seq_len,
+            full_fallback_mode=full_fallback_mode,
             verbose=verbose,
             auto_eval=auto_eval,
             **qgfd_kwargs,
@@ -307,7 +514,7 @@ def wrap_model_with_qgfd(
         except Exception:
             continue
 
-        if hasattr(orig, "qgfd") and hasattr(orig, "_orig"):
+        if hasattr(orig, "qgfd"):
             continue
 
         try:
@@ -319,6 +526,8 @@ def wrap_model_with_qgfd(
                 warmup_steps=warmup_steps,
                 kernel_size=kernel_size,
                 early_stop_eps=early_stop_eps,
+                max_full_seq_len=max_full_seq_len,
+                full_fallback_mode=full_fallback_mode,
                 **qgfd_kwargs,
             )
             instantiated.append((name, wrapper))

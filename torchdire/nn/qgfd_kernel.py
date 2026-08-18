@@ -84,7 +84,11 @@ class QGFDKernel(nn.Module):
         # different metadata than during the forward pass".
         self.register_buffer("step_count", torch.zeros(1, dtype=torch.long))
 
-        # Conv mode parameter setup
+        # Conv mode parameter setup. The kernel is only learned when conv
+        # diffusion is the EXPLICIT mode; when conv is merely the long-context
+        # fallback (full_fallback_mode="conv") it is a fixed local smoother
+        # (requires_grad=False) so an unused parameter never appears in the
+        # optimizer/state dict.
         if self.mode == "conv" or self.full_fallback_mode == "conv":
             assert kernel_size >= 1 and kernel_size % 2 == 1, "kernel_size must be odd >= 1"
             self.kernel_size = kernel_size
@@ -94,7 +98,7 @@ class QGFDKernel(nn.Module):
             kernel = kernel / kernel.sum()
             self.register_parameter(
                 "conv_kernel",
-                nn.Parameter(kernel.view(1, 1, kernel_size)),
+                nn.Parameter(kernel.view(1, 1, kernel_size), requires_grad=(self.mode == "conv")),
             )
 
     def set_step(self, step: int) -> None:
@@ -150,16 +154,9 @@ class QGFDKernel(nn.Module):
         if is_causal is None:
             is_causal = getattr(self, "is_causal", False)
         B, H_k, Lk, head_dim = K.shape
-        if target_heads is not None and H_k != target_heads:
-            repeat_factor = target_heads // H_k
-            K = torch.repeat_interleave(K, repeat_factor, dim=1)
 
         K_norm = F.normalize(K, p=2, dim=-1, eps=self._eps(K))
-        # torch.matmul (not torch.einsum): einsum's internal batch-matmul path
-        # flattens batch dims to 3D views whose saved-tensor metadata can differ
-        # between a forward pass and its gradient-checkpoint recompute
-        # (use_reentrant=False), raising "Recomputed values ... different metadata".
-        # matmul on 4D operands always saves the native 4D tensors.
+        # Compute similarity on H_k heads directly before expanding to target_heads (huge savings for GQA)
         sim = torch.matmul(K_norm, K_norm.transpose(-1, -2))
         
         if is_causal:
@@ -171,12 +168,16 @@ class QGFDKernel(nn.Module):
         # 2. Isolate Position 0 (BOS / Attention Sink): Position 0 only transitions to itself
         # This prevents the LLM's attention sink weight at Pos 0 (often 80%+) from polluting semantic key diffusion
         if Lk > 1:
-            P_row0 = torch.zeros_like(P[:, :, :1, :])
-            P_row0[:, :, 0, 0] = 1.0
-            P = torch.cat([P_row0, P[:, :, 1:, :]], dim=2)
+            P = P.clone()
+            P[:, :, 0, :] = 0.0
+            P[:, :, 0, 0] = 1.0
 
         jitter = self._eps(P)
         P = P * (1.0 - jitter) + (jitter / P.size(-1))
+
+        if target_heads is not None and H_k != target_heads:
+            repeat_factor = target_heads // H_k
+            P = torch.repeat_interleave(P, repeat_factor, dim=1)
 
         if self.detach_P:
             P = P.detach()
@@ -375,27 +376,31 @@ class QGFDKernel(nn.Module):
                 p = p0
             elif mode == "full":
                 P = self.build_transition_from_keys(key_states, target_heads=H, is_causal=self.is_causal)
-                p = p0
-                prev_p = None
+                if self.diffusion_steps == 1 and valid_mask is None and self.early_stop_eps <= 0.0:
+                    # Optimized single-step path: avoids loop overhead and intermediate allocations
+                    p = (1.0 - alpha_eff) * p0 + alpha_eff * torch.matmul(p0, P)
+                else:
+                    p = p0
+                    prev_p = None
 
-                for _ in range(self.diffusion_steps):
-                    p_next = (1.0 - alpha_eff) * p0 + alpha_eff * torch.matmul(p, P)
+                    for _ in range(self.diffusion_steps):
+                        p_next = (1.0 - alpha_eff) * p0 + alpha_eff * torch.matmul(p, P)
 
-                    if valid_mask is not None:
-                        p_next = p_next * valid_mask.to(p_next.dtype)
-                    Z = p_next.sum(dim=-1, keepdim=True).clamp(min=self._eps(p_next))
-                    p_next = p_next / Z
+                        if valid_mask is not None:
+                            p_next = p_next * valid_mask.to(p_next.dtype)
+                        Z = p_next.sum(dim=-1, keepdim=True).clamp(min=self._eps(p_next))
+                        p_next = p_next / Z
 
-                    # The early-stop break is data-dependent, but it is safe
-                    # under checkpointing because alpha is externally fixed:
-                    # recomputation reproduces bitwise-identical p_next values
-                    # and therefore takes the same branch.
-                    if prev_p is not None and torch.max(torch.abs(p_next - prev_p)) < self.early_stop_eps:
+                        # The early-stop break is data-dependent, but it is safe
+                        # under checkpointing because alpha is externally fixed:
+                        # recomputation reproduces bitwise-identical p_next values
+                        # and therefore takes the same branch.
+                        if prev_p is not None and self.early_stop_eps > 0.0 and torch.max(torch.abs(p_next - prev_p)) < self.early_stop_eps:
+                            p = p_next
+                            break
+
+                        prev_p = p
                         p = p_next
-                        break
-
-                    prev_p = p
-                    p = p_next
             else:
                 p = self.diffuse_via_conv(p0, valid_mask, alpha_eff)
 
