@@ -238,7 +238,14 @@ class SafeWrappedAttention(nn.Module):
         else:
             try:
                 _src = inspect.getsource(orig_mod.forward)
-                _layout = "cond" if "output_attentions" in _src else "always2"
+                if "output_attentions" not in _src:
+                    _layout = "always2"
+                elif "attention_interface" in _src or "cache_position" in _src:
+                    # merged modern attention (transformers >= 4.52): the
+                    # attention interface always returns (output, attn_weights)
+                    _layout = "always2"
+                else:
+                    _layout = "cond"
             except Exception:
                 _layout = "cond"
         object.__setattr__(self, "_return_layout", _layout)
@@ -304,6 +311,23 @@ class SafeWrappedAttention(nn.Module):
         if p_kv is None:
             p_kv = kwargs.get("past_key_values")  # newer transformers kwarg name
 
+        # transformers >= 4.48 / v5 pass a Cache object (DynamicCache etc.):
+        # the attention layer must update it IN PLACE via .update() and
+        # receives the full concatenated key/value states back. Legacy
+        # transformers pass a per-layer (k, v) 2-tuple. Anything else is
+        # treated as "no cache" — silently ignoring a modern Cache object
+        # makes every decode step attend only to the current token and the
+        # model degenerates into repetition ("foxesessss...").
+        modern_cache = False
+        if p_kv is not None and not isinstance(p_kv, (list, tuple)):
+            if hasattr(p_kv, "self_attention_cache"):  # EncoderDecoderCache
+                p_kv = p_kv.self_attention_cache
+            if hasattr(p_kv, "update") and getattr(self, "layer_idx", None) is not None:
+                modern_cache = True
+            else:
+                p_kv = None
+        legacy_cache = p_kv is not None and isinstance(p_kv, (list, tuple)) and len(p_kv) == 2
+
         # SDPA-style attention layers receive attention_mask=None from the
         # model because they build their causal mask internally; the QGFD
         # kernel does not, so without this the softmax (and the diffusion)
@@ -314,9 +338,12 @@ class SafeWrappedAttention(nn.Module):
         eff_mask = attention_mask
         if key_value_states is None and self._is_causal_self_attn():
             Lq = hidden_states.shape[1]
-            if p_kv is not None and isinstance(p_kv, (list, tuple)) and len(p_kv) == 2:
+            if legacy_cache:
                 Lk = p_kv[0].shape[2] + Lq
                 past_len = Lk - Lq
+            elif modern_cache:
+                past_len = p_kv.get_seq_length()  # before this step's update
+                Lk = past_len + Lq
             else:
                 Lk = Lq
                 past_len = 0
@@ -334,16 +361,21 @@ class SafeWrappedAttention(nn.Module):
                 if causal_add is not None:
                     eff_mask = eff_mask + causal_add
 
-        if p_kv is not None and isinstance(p_kv, (list, tuple)) and len(p_kv) == 2:
-            prev_k, prev_v = p_kv
+        if legacy_cache or modern_cache:
+            if legacy_cache:
+                prev_k, prev_v = p_kv
             k_out = self.qgfd.k_proj.weight.shape[0]
             kv_heads = k_out // self.head_dim
             k_new = self.qgfd.k_proj(hidden_states).view(hidden_states.shape[0], hidden_states.shape[1], kv_heads, self.head_dim).transpose(1, 2)
             v_new = self.qgfd.v_proj(hidden_states).view(hidden_states.shape[0], hidden_states.shape[1], kv_heads, self.head_dim).transpose(1, 2)
 
-            full_k = torch.cat([prev_k, k_new], dim=2)
-            full_v = torch.cat([prev_v, v_new], dim=2)
-            present = (full_k, full_v)
+            if modern_cache:
+                full_k, full_v = p_kv.update(k_new, v_new, self.layer_idx)
+                present = None  # cache was mutated in place; model ignores layer returns
+            else:
+                full_k = torch.cat([prev_k, k_new], dim=2)
+                full_v = torch.cat([prev_v, v_new], dim=2)
+                present = (full_k, full_v)
 
             Q = self.qgfd.q_proj(hidden_states).view(hidden_states.shape[0], hidden_states.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
             scores = torch.einsum("bhqd,bhkd->bhqk", Q, full_k) / math.sqrt(self.head_dim)
