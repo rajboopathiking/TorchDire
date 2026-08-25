@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchdire"
-version = "1.0.1"
+version = "1.1.0"
 description = "Query-Graph Flow Diffusion (QGFD) Ecosystem for PyTorch"
+
 readme = "README.md"
 authors = [{ name = "Raj Boopathi" }]
 license = { text = "MIT" }
@@ -28,3 +29,8 @@ dev = [
 
 [project.urls]
 "Homepage" = "https://github.com/rajboopathiking/TorchDire.git"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
