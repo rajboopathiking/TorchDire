@@ -233,17 +233,6 @@ class LlamaAttentionAdapter(AttentionOperatorAdapter):
             getattr(self.config, 'rope_theta', 10000.0) if self.config else 10000.0
         )
 
-        # Detect return layout: modern transformers (>=4.43) returns 2-tuple (attn_output, attn_weights)
-        self._return_layout = "always2"
-        try:
-            import inspect
-            src = inspect.getsource(original_attention.forward)
-            if "return attn_output, attn_weights, past_key_value" in src or "return attn_output, past_key_value, attn_weights" in src:
-                self._return_layout = "legacy_3tuple"
-            else:
-                self._return_layout = "always2"
-        except Exception:
-            self._return_layout = "always2"
 
 
     def forward(
@@ -393,23 +382,9 @@ class LlamaAttentionAdapter(AttentionOperatorAdapter):
         if not output_attentions:
             attn_weights = None
 
-        # Handle return format
-        is_modern = (
-            cache_position is not None
-            or position_embeddings is not None
-            or (past_key_value is not None and not isinstance(past_key_value, (list, tuple)))
-            or kwargs.get("past_key_values") is not None
-        )
-
-        if is_modern or getattr(self, "_return_layout", "always2") == "always2":
-            return attn_output, attn_weights
-
-        if getattr(self, "_return_layout", "legacy_3tuple") == "legacy_3tuple":
-            if output_attentions:
-                return attn_output, past_key_value, attn_weights
-            return attn_output, attn_weights, past_key_value
-
+        # LLaMA, Mistral, and Qwen2 decoder layers always expect a 2-tuple: (attn_output, attn_weights)
         return attn_output, attn_weights
+
 
 
 
