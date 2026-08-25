@@ -111,6 +111,8 @@ class AttentionOperatorAdapter(nn.Module):
         super().__init__()
         self.original_attention = original_attention
         self.prob_operator = prob_operator
+        self.config = getattr(original_attention, "config", None)
+        self.layer_idx = getattr(original_attention, "layer_idx", None)
         
         # Copy over all non-callable attributes from original
         for attr in dir(original_attention):
@@ -121,6 +123,18 @@ class AttentionOperatorAdapter(nn.Module):
                         setattr(self, attr, val)
                 except Exception:
                     pass
+
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            orig = self.__dict__.get("original_attention")
+            if orig is not None and hasattr(orig, name):
+                return getattr(orig, name)
+            cfg = self.__dict__.get("config")
+            if cfg is not None and hasattr(cfg, name):
+                return getattr(cfg, name)
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     @abstractmethod
     def forward(self, *args, **kwargs):
@@ -149,17 +163,75 @@ class LlamaAttentionAdapter(AttentionOperatorAdapter):
         self.layer_idx = layer_idx or getattr(original_attention, 'layer_idx', None)
         
         # Copy projection modules and rotary embedding from original attention
-        # These are nn.Modules so they weren't copied by the base class
         for attr in ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'rotary_emb']:
             if hasattr(original_attention, attr):
                 setattr(self, attr, getattr(original_attention, attr))
         
-        # Ensure we have all required attributes
-        for attr in ['num_heads', 'num_key_value_heads', 'head_dim', 'hidden_size', 
-                     'num_key_value_groups', 'attention_dropout', 'is_causal',
-                     'max_position_embeddings', 'rope_theta']:
-            if hasattr(original_attention, attr):
-                setattr(self, attr, getattr(original_attention, attr))
+        # Robust attribute resolution with fallbacks for modern transformers (>=4.45 / 4.48)
+        num_heads = (
+            getattr(original_attention, 'num_heads', None)
+            or getattr(original_attention, 'num_attention_heads', None)
+            or getattr(original_attention, 'n_head', None)
+            or (getattr(self.config, 'num_attention_heads', None) if self.config else None)
+            or (getattr(self.config, 'num_heads', None) if self.config else None)
+            or (getattr(self.config, 'n_head', None) if self.config else None)
+        )
+        if num_heads is None and hasattr(original_attention, 'q_proj') and hasattr(original_attention.q_proj, 'weight'):
+            q_out_dim = original_attention.q_proj.weight.shape[0]
+            for h in [64, 32, 24, 16, 12, 8, 6, 4, 2]:
+                if q_out_dim % h == 0:
+                    num_heads = h
+                    break
+        if num_heads is None:
+            num_heads = 32
+
+        self.num_heads = num_heads
+        self.num_attention_heads = num_heads
+
+        num_kv_heads = (
+            getattr(original_attention, 'num_key_value_heads', None)
+            or (getattr(self.config, 'num_key_value_heads', None) if self.config else None)
+            or num_heads
+        )
+        self.num_key_value_heads = num_kv_heads
+
+        hidden_size = (
+            getattr(original_attention, 'hidden_size', None)
+            or (getattr(self.config, 'hidden_size', None) if self.config else None)
+        )
+        if hidden_size is None and hasattr(original_attention, 'q_proj') and hasattr(original_attention.q_proj, 'weight'):
+            hidden_size = original_attention.q_proj.weight.shape[1]
+        self.hidden_size = hidden_size
+
+        head_dim = (
+            getattr(original_attention, 'head_dim', None)
+            or (getattr(self.config, 'head_dim', None) if self.config else None)
+            or ((hidden_size // num_heads) if (hidden_size and num_heads) else 64)
+        )
+        self.head_dim = head_dim
+
+        kv_groups = (
+            getattr(original_attention, 'num_key_value_groups', None)
+            or ((num_heads // num_kv_heads) if (num_heads and num_kv_heads) else 1)
+        )
+        self.num_key_value_groups = kv_groups
+
+        self.attention_dropout = getattr(
+            original_attention, 'attention_dropout',
+            getattr(self.config, 'attention_dropout', 0.0) if self.config else 0.0
+        )
+        self.is_causal = getattr(
+            original_attention, 'is_causal',
+            getattr(self.config, 'is_causal', True) if self.config else True
+        )
+        self.max_position_embeddings = getattr(
+            original_attention, 'max_position_embeddings',
+            getattr(self.config, 'max_position_embeddings', 2048) if self.config else 2048
+        )
+        self.rope_theta = getattr(
+            original_attention, 'rope_theta',
+            getattr(self.config, 'rope_theta', 10000.0) if self.config else 10000.0
+        )
 
     def forward(
         self,
@@ -173,28 +245,29 @@ class LlamaAttentionAdapter(AttentionOperatorAdapter):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        # Handle transformers >=5 passing cache as past_key_values
+        # Handle transformers >=5 passing cache as past_key_values / layer_past
         if past_key_value is None:
-            past_key_value = kwargs.get("past_key_values", None)
+            past_key_value = kwargs.get("past_key_values", kwargs.get("layer_past", None))
 
         bsz, q_len, _ = hidden_states.size()
 
         # QKV projections - use original modules
-        if self.config.pretraining_tp > 1:
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+        pretraining_tp = getattr(self.config, "pretraining_tp", 1) if self.config else 1
+        if pretraining_tp > 1:
+            key_value_slicing = (self.num_key_value_heads * self.head_dim) // pretraining_tp
             query_slices = self.q_proj.weight.split(
-                (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
+                (self.num_heads * self.head_dim) // pretraining_tp, dim=0
             )
             key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
             value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
 
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(pretraining_tp)]
             query_states = torch.cat(query_states, dim=-1)
 
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(pretraining_tp)]
             key_states = torch.cat(key_states, dim=-1)
 
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(pretraining_tp)]
             value_states = torch.cat(value_states, dim=-1)
         else:
             query_states = self.q_proj(hidden_states)
@@ -207,21 +280,34 @@ class LlamaAttentionAdapter(AttentionOperatorAdapter):
 
         # RoPE
         if position_embeddings is None:
-            cos, sin = self.rotary_emb(value_states, position_ids)
+            if hasattr(self, 'rotary_emb') and self.rotary_emb is not None:
+                cos, sin = self.rotary_emb(value_states, position_ids)
+            elif hasattr(self.original_attention, 'rotary_emb') and self.original_attention.rotary_emb is not None:
+                cos, sin = self.original_attention.rotary_emb(value_states, position_ids)
+            else:
+                cos, sin = None, None
         else:
             cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        if cos is not None and sin is not None:
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         # KV Cache
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(
-                key_states, value_states, self.layer_idx, cache_kwargs
-            )
+            if hasattr(past_key_value, "update"):
+                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                key_states, value_states = past_key_value.update(
+                    key_states, value_states, self.layer_idx, cache_kwargs
+                )
+            elif isinstance(past_key_value, (list, tuple)) and len(past_key_value) == 2:
+                past_k, past_v = past_key_value
+                key_states = torch.cat([past_k, key_states], dim=-2)
+                value_states = torch.cat([past_v, value_states], dim=-2)
+                past_key_value = (key_states, value_states)
 
         # GQA
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
+
 
         # Attention scores
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
@@ -283,10 +369,11 @@ class LlamaAttentionAdapter(AttentionOperatorAdapter):
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         # Output projection
-        if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+        pretraining_tp = getattr(self.config, "pretraining_tp", 1) if self.config else 1
+        if pretraining_tp > 1:
+            attn_output = attn_output.split(self.hidden_size // pretraining_tp, dim=2)
+            o_proj_slices = self.o_proj.weight.split(self.hidden_size // pretraining_tp, dim=1)
+            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(pretraining_tp)])
         else:
             attn_output = self.o_proj(attn_output)
 

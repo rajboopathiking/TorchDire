@@ -22,8 +22,10 @@ from torchdire.nn.attention_operators import (
 from torchdire.nn.attention_adapters import (
     patch_model_with_operator,
     create_attention_adapter,
+    LlamaAttentionAdapter,
     _is_leaf_attention,
 )
+
 
 
 def test_softmax_operator_parity():
@@ -287,8 +289,32 @@ def test_llama_attention_adapter():
             adapter_attn_output_cache = adapter_out_cache
     
     assert orig_attn_output_cache.shape == adapter_attn_output_cache.shape
+
+    # Specifically test attribute access and delegation (e.g. num_heads, head_dim)
+    assert hasattr(adapter, "num_heads") and adapter.num_heads == 8
+    assert hasattr(adapter, "head_dim") and adapter.head_dim == 32
+    assert hasattr(adapter, "num_key_value_heads") and adapter.num_key_value_heads == 4
+
+    # Test simulating modern transformers where orig_attn only has config.num_attention_heads
+    class ModernLlamaAttentionMock(nn.Module):
+        def __init__(self, cfg):
+            super().__init__()
+            self.config = cfg
+            self.layer_idx = 0
+            self.q_proj = nn.Linear(cfg.hidden_size, cfg.hidden_size, bias=False)
+            self.k_proj = nn.Linear(cfg.hidden_size, cfg.hidden_size // 2, bias=False)
+            self.v_proj = nn.Linear(cfg.hidden_size, cfg.hidden_size // 2, bias=False)
+            self.o_proj = nn.Linear(cfg.hidden_size, cfg.hidden_size, bias=False)
+            # Notice NO self.num_heads or self.head_dim on self (only on self.config)
+
+    mock_attn = ModernLlamaAttentionMock(config)
+    adapter_mock = LlamaAttentionAdapter(mock_attn, operator)
+    assert adapter_mock.num_heads == 8
+    assert adapter_mock.head_dim == 32
+    assert adapter_mock.num_key_value_heads == 4
     
     print("✓ LlamaAttentionAdapter test passed")
+
 
 
 def test_operator_replacer_on_dummy_model():
