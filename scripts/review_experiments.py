@@ -29,8 +29,8 @@ import math
 import os
 import random
 import time
-from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Optional
+from dataclasses import dataclass, field, asdict, replace
+from typing import List, Dict, Optional, Sequence, Tuple
 
 import torch
 
@@ -77,6 +77,10 @@ class ExperimentConfig:
     target_alpha: float = 0.05
     max_full_seq_len: int = 512
     full_fallback_mode: str = "conv"
+    # Whether the key-similarity transition matrix P carries gradient. True (the
+    # default) treats P as a fixed routing structure; exposed here so the ablation
+    # can vary it rather than pretending to.
+    detach_P: bool = True
     # Perplexity eval
     ppl_num_texts: int = 200          # number of wikitext docs to concatenate
     ppl_max_length: int = 512
@@ -102,6 +106,12 @@ class ExperimentConfig:
     # Output
     out_dir: str = "./qgfd_review_results"
     seed: int = 42
+    # Multi-seed protocol (set by run_all_seeds; None = legacy deterministic slice).
+    # When set, the WikiText pool is shuffled with this seed before taking the
+    # first N paragraphs, so clean perplexity varies across seeds instead of
+    # being a single deterministic point estimate.
+    text_sample_seed: Optional[int] = None
+    text_pool_size: int = 1200
 # __APPEND_MARKER__
 
 
@@ -145,7 +155,7 @@ def build_operator(kind: str, cfg: ExperimentConfig):
             mode="full",
             max_full_seq_len=cfg.max_full_seq_len,
             full_fallback_mode=cfg.full_fallback_mode,
-            detach_P=True,
+            detach_P=cfg.detach_P,
             is_causal=True,        # REQUIRED for causal LMs — see module docstring
         )
     raise ValueError(f"unknown operator kind: {kind}")
@@ -447,14 +457,34 @@ def _run_arm(kind: str, cfg: ExperimentConfig, texts: List[str]) -> Dict:
     return arm
 
 
+def select_texts(cfg: ExperimentConfig) -> List[str]:
+    """
+    WikiText paragraphs for this run.
+
+    With cfg.text_sample_seed=None the behaviour is the legacy deterministic
+    "first N paragraphs". With a seed set (the multi-seed protocol) a larger
+    pool is loaded and shuffled first, so each seed evaluates a different
+    subsample — that is what gives clean perplexity a non-degenerate variance.
+    """
+    n_texts = max(cfg.ppl_num_texts, cfg.robustness_num_texts, cfg.attn_num_texts)
+    if cfg.text_sample_seed is None:
+        print(f"Loading WikiText-2 ({n_texts} paragraphs) ...", flush=True)
+        return load_wikitext(n_texts)
+
+    pool_size = max(n_texts, cfg.text_pool_size)
+    print(f"Loading WikiText-2 (pool {pool_size}, subsampling {n_texts} "
+          f"@ text_sample_seed={cfg.text_sample_seed}) ...", flush=True)
+    pool = list(load_wikitext(pool_size))
+    random.Random(cfg.text_sample_seed).shuffle(pool)
+    return pool[:n_texts]
+
+
 def run_all(cfg: ExperimentConfig) -> Dict:
     os.makedirs(cfg.out_dir, exist_ok=True)
     random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
 
-    n_texts = max(cfg.ppl_num_texts, cfg.robustness_num_texts, cfg.attn_num_texts)
-    print(f"Loading WikiText-2 ({n_texts} paragraphs) ...", flush=True)
-    texts = load_wikitext(n_texts)
+    texts = select_texts(cfg)
 
     results = {"config": asdict(cfg), "device": resolve_device(cfg.device), "arms": {}}
     for kind in ("softmax", "qgfd"):
@@ -553,6 +583,292 @@ def _plot(results: Dict, cfg: ExperimentConfig) -> None:
     print(f"Saved plots -> {p1}, {p2}")
 
 
+# --------------------------------------------------------------------------- #
+# Multi-seed protocol — mean +/- std with confidence intervals
+# --------------------------------------------------------------------------- #
+# Single-seed point estimates cannot support a claim like "QGFD degrades less
+# under noise" when the effect is ~1% of the metric. run_all_seeds re-runs the
+# whole suite per seed (varying both the evaluated text subsample and the noise
+# realisation) and reports mean +/- std, t-based 95% CIs, and — the statistic
+# that actually matters — the PAIRED per-seed QGFD-minus-softmax difference.
+
+# Two-sided t critical values at 95%, indexed by degrees of freedom (n-1).
+_T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
+        7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228}
+
+
+def _stat(values: Sequence[float]) -> Dict:
+    """mean / std / sem / t-based 95% CI half-width for a small sample."""
+    vals = [float(v) for v in values]
+    n = len(vals)
+    if n == 0:
+        return {"mean": float("nan"), "std": 0.0, "sem": 0.0,
+                "ci95": 0.0, "n": 0, "values": []}
+    mean = sum(vals) / n
+    if n == 1:
+        std = sem = ci = 0.0
+    else:
+        std = math.sqrt(sum((v - mean) ** 2 for v in vals) / (n - 1))
+        sem = std / math.sqrt(n)
+        ci = _T95.get(n - 1, 1.96) * sem
+    return {"mean": mean, "std": std, "sem": sem, "ci95": ci,
+            "n": n, "values": vals}
+
+
+def fmt_stat(s: Dict, prec: int = 3, ci: bool = False) -> str:
+    """'11.234 +/- 0.021' (std by default, CI half-width if ci=True)."""
+    spread = s["ci95"] if ci else s["std"]
+    return f"{s['mean']:.{prec}f} +/- {spread:.{prec}f}"
+
+
+def _rate_key(rate) -> str:
+    """Stable string key for a noise rate (JSON turns float keys into strings)."""
+    return f"{float(rate):.4f}"
+
+
+def _rk(d: Dict, rate) -> float:
+    """Read a robustness dict that may be float- or string-keyed."""
+    for k in (float(rate), _rate_key(rate), str(float(rate)), str(rate)):
+        if k in d:
+            return float(d[k])
+    raise KeyError(f"noise rate {rate!r} not in {list(d)}")
+
+
+def aggregate_runs(runs: Sequence[Dict], seeds: Optional[Sequence[int]] = None) -> Dict:
+    """
+    Collapse a list of run_all() result dicts into mean +/- std per metric.
+
+    Also emits `paired`: per-seed QGFD-minus-softmax differences. Because both
+    arms see the identical text subsample and identical noise realisation within
+    a seed, the paired difference removes the (large) between-seed corpus
+    variance and is the only statistic that can honestly support a small effect.
+    """
+    if not runs:
+        raise ValueError("aggregate_runs() got no runs")
+    seeds = list(seeds) if seeds is not None else [
+        r["config"].get("seed") for r in runs]
+    rates = sorted({float(r) for run in runs
+                    for r in run["arms"]["softmax"]["robustness"]})
+
+    agg: Dict = {
+        "meta": {
+            "seeds": seeds,
+            "n_seeds": len(runs),
+            "model_id": runs[0]["config"]["model_id"],
+            "device": runs[0].get("device"),
+            "dtype": runs[0]["config"]["dtype"],
+            "diffusion_steps": runs[0]["config"]["diffusion_steps"],
+            "target_alpha": runs[0]["config"]["target_alpha"],
+            "noise_rates": [_rate_key(r) for r in rates],
+            "ci_method": "two-sided t, 95%",
+            "baseline_note": ("baseline is eager materialised softmax "
+                              "(SoftmaxOperator), NOT SDPA/FlashAttention — "
+                              "QGFD needs the explicit probability matrix"),
+        },
+        "arms": {},
+        "paired": {},
+    }
+
+    for kind in ("softmax", "qgfd"):
+        arms = [r["arms"][kind] for r in runs]
+        clean = [a["clean_ppl"] for a in arms]
+        entry: Dict = {
+            "clean_ppl": _stat(clean),
+            "robustness": {},
+            "robustness_delta_pct": {},
+        }
+        # attention / latency are absent for the fine-tuning track, which reuses
+        # this aggregator for its post-training clean-PPL + robustness numbers.
+        if all("attention" in a for a in arms):
+            entry["attention"] = {
+                k: _stat([a["attention"][k] for a in arms])
+                for k in ("mean_attention_entropy_nats", "mean_sink_mass_pos0")
+            }
+        if all("latency" in a for a in arms):
+            entry["latency"] = {
+                k: _stat([a["latency"][k] for a in arms])
+                for k in ("prefill_ms", "tokens_per_s")
+            }
+        for rate in rates:
+            ppls = [_rk(a["robustness"], rate) for a in arms]
+            entry["robustness"][_rate_key(rate)] = _stat(ppls)
+            # Degradation relative to THIS seed's own clean run.
+            base = [_rk(a["robustness"], 0.0) for a in arms]
+            entry["robustness_delta_pct"][_rate_key(rate)] = _stat(
+                [100.0 * (p - b) / b for p, b in zip(ppls, base)])
+        agg["arms"][kind] = entry
+
+    sm = [r["arms"]["softmax"] for r in runs]
+    qg = [r["arms"]["qgfd"] for r in runs]
+    agg["paired"]["clean_ppl_qgfd_minus_softmax"] = _stat(
+        [q["clean_ppl"] - s["clean_ppl"] for s, q in zip(sm, qg)])
+    if all("latency" in a for a in sm + qg):
+        agg["paired"]["latency_overhead_x"] = _stat(
+            [q["latency"]["prefill_ms"] / max(1e-9, s["latency"]["prefill_ms"])
+             for s, q in zip(sm, qg)])
+    # Robustness gap: softmax degradation minus QGFD degradation, per seed.
+    # POSITIVE => QGFD degraded LESS => QGFD is more robust at that noise rate.
+    gap: Dict = {}
+    for rate in rates:
+        if rate == 0.0:
+            continue
+        per_seed = []
+        for s, q in zip(sm, qg):
+            sd = 100.0 * (_rk(s["robustness"], rate) - _rk(s["robustness"], 0.0)) / _rk(s["robustness"], 0.0)
+            qd = 100.0 * (_rk(q["robustness"], rate) - _rk(q["robustness"], 0.0)) / _rk(q["robustness"], 0.0)
+            per_seed.append(sd - qd)
+        gap[_rate_key(rate)] = _stat(per_seed)
+    agg["paired"]["robustness_gap_pct"] = gap
+    return agg
+
+
+def _signif(s: Dict) -> str:
+    """'*' when the paired 95% CI excludes zero, 'ns' otherwise."""
+    if s["n"] < 2:
+        return "?"
+    return "*" if abs(s["mean"]) > s["ci95"] > 0 else "ns"
+
+
+def _print_aggregate(agg: Dict) -> None:
+    m = agg["meta"]
+    sm, qg = agg["arms"]["softmax"], agg["arms"]["qgfd"]
+    w = 74
+    print("\n" + "=" * w)
+    print(f"QGFD MULTI-SEED SUMMARY — {m['model_id']}  "
+          f"(n={m['n_seeds']} seeds: {m['seeds']})")
+    print(f"T={m['diffusion_steps']}, alpha={m['target_alpha']}, "
+          f"dtype={m['dtype']}, device={m['device']}")
+    print("=" * w)
+    print(f"{'Metric':<34}{'softmax':>19}{'qgfd':>19}")
+    print("-" * w)
+    rows = [("Clean perplexity", sm["clean_ppl"], qg["clean_ppl"], 3)]
+    if "attention" in sm and "attention" in qg:
+        rows += [
+            ("Attn entropy (nats)",
+             sm["attention"]["mean_attention_entropy_nats"],
+             qg["attention"]["mean_attention_entropy_nats"], 3),
+            ("Sink mass @ pos0",
+             sm["attention"]["mean_sink_mass_pos0"],
+             qg["attention"]["mean_sink_mass_pos0"], 4),
+        ]
+    if "latency" in sm and "latency" in qg:
+        rows += [
+            ("Prefill latency (ms)",
+             sm["latency"]["prefill_ms"], qg["latency"]["prefill_ms"], 2),
+            ("Tokens / s",
+             sm["latency"]["tokens_per_s"], qg["latency"]["tokens_per_s"], 1),
+        ]
+    for name, a, b, p in rows:
+        print(f"{name:<34}{fmt_stat(a, p):>19}{fmt_stat(b, p):>19}")
+    print("-" * w)
+    print("Robustness — perplexity degradation vs clean (mean +/- std over seeds):")
+    print(f"{'noise':>7}{'softmax d%':>20}{'qgfd d%':>20}{'gap (sm-qg)':>18}{'':>4}")
+    for rate in m["noise_rates"]:
+        if float(rate) == 0.0:
+            continue
+        s_d = sm["robustness_delta_pct"][rate]
+        q_d = qg["robustness_delta_pct"][rate]
+        g = agg["paired"]["robustness_gap_pct"][rate]
+        print(f"{float(rate) * 100:>6.0f}%{fmt_stat(s_d, 2):>20}"
+              f"{fmt_stat(q_d, 2):>20}{fmt_stat(g, 2):>18}{_signif(g):>4}")
+    print("-" * w)
+    cp = agg["paired"]["clean_ppl_qgfd_minus_softmax"]
+    print(f"Paired clean-PPL delta (qgfd - softmax): {fmt_stat(cp, 4)}  "
+          f"[95% CI +/-{cp['ci95']:.4f}] {_signif(cp)}")
+    if "latency_overhead_x" in agg["paired"]:
+        lo = agg["paired"]["latency_overhead_x"]
+        print(f"Paired prefill overhead: {fmt_stat(lo, 3)}x  "
+              f"(vs EAGER softmax, not SDPA/FlashAttention)")
+    print("'*' = paired 95% CI excludes 0 · 'ns' = not distinguishable from 0")
+    print("=" * w)
+
+
+def _plot_aggregate(agg: Dict, out_dir: str) -> List[str]:
+    """Robustness curve with error bars + the paired robustness gap."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        print("(matplotlib not available — skipping aggregate plots)")
+        return []
+
+    m = agg["meta"]
+    rates = [float(r) for r in m["noise_rates"]]
+    sm, qg = agg["arms"]["softmax"], agg["arms"]["qgfd"]
+    paths = []
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    ax = axes[0]
+    for arm, label, marker in ((sm, "Softmax", "o"), (qg, "QGFD", "s")):
+        ys = [arm["robustness"][_rate_key(r)]["mean"] for r in rates]
+        es = [arm["robustness"][_rate_key(r)]["std"] for r in rates]
+        ax.errorbar([r * 100 for r in rates], ys, yerr=es, fmt=marker + "-",
+                    capsize=4, label=label)
+    ax.set_xlabel("Character noise rate (%)")
+    ax.set_ylabel("Perplexity")
+    ax.set_title(f"Noise robustness (n={m['n_seeds']} seeds, mean +/- std)")
+    ax.legend(); ax.grid(alpha=0.3)
+
+    ax = axes[1]
+    nz = [r for r in rates if r != 0.0]
+    gaps = [agg["paired"]["robustness_gap_pct"][_rate_key(r)]["mean"] for r in nz]
+    cis = [agg["paired"]["robustness_gap_pct"][_rate_key(r)]["ci95"] for r in nz]
+    ax.bar([f"{r * 100:.0f}%" for r in nz], gaps, yerr=cis, capsize=5,
+           color=["#3b7" if g > 0 else "#c55" for g in gaps])
+    ax.axhline(0, color="k", lw=1)
+    ax.set_xlabel("Character noise rate")
+    ax.set_ylabel("softmax d% - qgfd d%   (>0 = QGFD more robust)")
+    ax.set_title("Paired robustness gap (95% CI)")
+    ax.grid(alpha=0.3, axis="y")
+
+    fig.suptitle(m["model_id"], fontsize=10)
+    fig.tight_layout()
+    p = os.path.join(out_dir, "robustness_aggregated.png")
+    fig.savefig(p, dpi=150); plt.close(fig)
+    paths.append(p)
+    print(f"Saved aggregate plot -> {p}")
+    return paths
+
+
+def run_all_seeds(cfg: ExperimentConfig,
+                  seeds: Sequence[int] = (0, 1, 2),
+                  vary_texts: bool = True) -> Dict:
+    """
+    Run the full suite once per seed and aggregate into mean +/- std.
+
+    Each seed varies (a) the evaluated WikiText subsample and (b) the character
+    noise realisation, while keeping both arms perfectly paired within a seed.
+    Per-seed artefacts land in `<out_dir>/seed<k>/`; the aggregate goes to
+    `<out_dir>/results_aggregated.json`.
+
+    Setting vary_texts=False keeps the deterministic corpus slice — then clean
+    perplexity is identical across seeds by construction (std == 0), which is
+    honest but uninformative, so the default is True.
+    """
+    os.makedirs(cfg.out_dir, exist_ok=True)
+    runs, seeds = [], list(seeds)
+    for i, s in enumerate(seeds):
+        print(f"\n{'#' * 74}\n# SEED {s}  ({i + 1}/{len(seeds)})\n{'#' * 74}", flush=True)
+        sub = replace(
+            cfg,
+            seed=s,
+            robustness_seed=s,
+            text_sample_seed=(s if vary_texts else None),
+            out_dir=os.path.join(cfg.out_dir, f"seed{s}"),
+        )
+        runs.append(run_all(sub))
+
+    agg = aggregate_runs(runs, seeds)
+    path = os.path.join(cfg.out_dir, "results_aggregated.json")
+    with open(path, "w") as f:
+        json.dump(agg, f, indent=2)
+    print(f"\nSaved aggregated results -> {path}")
+    _print_aggregate(agg)
+    _plot_aggregate(agg, cfg.out_dir)
+    return agg
+
+
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="QGFD Milestone-1 review experiments")
@@ -561,15 +877,26 @@ if __name__ == "__main__":
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--out_dir", default="./qgfd_review_results")
     ap.add_argument("--ppl_num_texts", type=int, default=ExperimentConfig.ppl_num_texts)
+    ap.add_argument("--diffusion_steps", type=int, default=ExperimentConfig.diffusion_steps)
+    ap.add_argument("--target_alpha", type=float, default=ExperimentConfig.target_alpha)
+    ap.add_argument("--seeds", default=None,
+                    help="Comma-separated seeds, e.g. '0,1,2'. Enables the "
+                         "multi-seed protocol (mean +/- std + paired CIs).")
     ap.add_argument("--quick", action="store_true",
                     help="Tiny budget for a fast smoke run")
     a = ap.parse_args()
     cfg = ExperimentConfig(model_id=a.model_id, device=a.device, dtype=a.dtype,
-                           out_dir=a.out_dir, ppl_num_texts=a.ppl_num_texts)
+                           out_dir=a.out_dir, ppl_num_texts=a.ppl_num_texts,
+                           diffusion_steps=a.diffusion_steps,
+                           target_alpha=a.target_alpha)
     if a.quick:
         cfg.ppl_num_texts = 8; cfg.robustness_num_texts = 8
         cfg.attn_num_texts = 4; cfg.latency_iters = 3; cfg.latency_warmup = 1
-    run_all(cfg)
+        cfg.text_pool_size = 64
+    if a.seeds:
+        run_all_seeds(cfg, seeds=[int(s) for s in a.seeds.split(",") if s.strip()])
+    else:
+        run_all(cfg)
 
 
 

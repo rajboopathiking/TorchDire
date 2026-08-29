@@ -19,6 +19,23 @@ QGFD can be used as:
 
 ---
 
+## 📚 Documentation
+
+Full documentation lives in **[`docs/`](docs/README.md)**:
+
+| Document | What it covers |
+| --- | --- |
+| [docs/paper-experiments.md](docs/paper-experiments.md) | Running all four experiment tracks and building `paper/REPORT.md` |
+| [docs/interpreting-results.md](docs/interpreting-results.md) | What each number licenses — paired statistics, CIs, baselines, caveats |
+| [docs/results-schema.md](docs/results-schema.md) | The result JSON contract, for consuming the output from your own code |
+| [docs/architecture.md](docs/architecture.md) | The operator vs kernel paths, `is_causal`, and the dead-LoRA bug |
+| [QGFD_CONFIG_REFERENCE.md](QGFD_CONFIG_REFERENCE.md) | Per-parameter min / max / recommended values |
+| [REVIEW_RUN_GUIDE.md](REVIEW_RUN_GUIDE.md) | Milestone-1 zero-shot review only |
+
+New here? Start with [docs/README.md](docs/README.md).
+
+---
+
 ## ✨ Key Ideas
 
 ### What QGFD Does (Intuitively)

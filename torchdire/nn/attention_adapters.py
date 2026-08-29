@@ -254,6 +254,56 @@ class LlamaAttentionAdapter(AttentionOperatorAdapter):
             getattr(self.config, 'rope_theta', 10000.0) if self.config else 10000.0
         )
 
+        # Take `original_attention` out of the module tree (see the long note in
+        # _detach_original_from_tree). The object itself is kept intact and
+        # reachable as a plain attribute for attribute delegation.
+        self._detach_original_from_tree(
+            original_attention, ('q_proj', 'k_proj', 'v_proj', 'o_proj', 'rotary_emb')
+        )
+
+    def _detach_original_from_tree(self, original_attention: nn.Module, aliased) -> None:
+        """
+        Unregister `original_attention` as a submodule once its projections are
+        aliased onto `self`.
+
+        Why: `self.q_proj` and `self.original_attention.q_proj` were the SAME
+        Linear reachable under two names, and nn.Module.named_modules()
+        de-duplicates shared submodules — it yields only the first name it meets,
+        which is the `original_attention.*` one (registered first, in the base
+        __init__). PEFT builds its target list from named_modules() and rebinds by
+        setattr on the parent, so LoRA landed on `original_attention.q_proj` — a
+        module this adapter's forward() never calls. The live projection stayed a
+        frozen nn.Linear, so the adapters were dead weight, and with nothing else
+        trainable backward raised "element 0 of tensors does not require grad".
+
+        Unregistering (rather than deleting the original's own entries) keeps
+        `original_attention` fully functional for callers that held a reference,
+        and restores the stock checkpoint key layout (`self_attn.q_proj.weight`).
+        """
+        bound = {n for n in aliased
+                 if self._modules.get(n) is not None
+                 and original_attention._modules.get(n) is self._modules[n]}
+        leftover = [
+            n for n, m in original_attention._modules.items()
+            if m is not None and n not in bound and next(m.parameters(), None) is not None
+        ]
+        if leftover:
+            # An architecture with extra parametrised submodules (e.g. q_norm /
+            # k_norm). Dropping them from the tree would silently exclude them
+            # from state_dict() and .to(); keep the original registered instead.
+            import warnings
+            warnings.warn(
+                f"{type(self).__name__}: keeping `original_attention` in the module "
+                f"tree because {leftover} are not aliased onto the adapter. "
+                f"PEFT/LoRA will target `original_attention.*`, which this adapter's "
+                f"forward() does not call — do not fine-tune this architecture "
+                f"through the operator path.",
+                RuntimeWarning,
+            )
+            return
+        del self._modules["original_attention"]
+        object.__setattr__(self, "original_attention", original_attention)
+
 
 
     def forward(
