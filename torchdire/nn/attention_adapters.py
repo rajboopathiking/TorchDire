@@ -14,6 +14,27 @@ import torch.nn.functional as F
 from abc import abstractmethod
 from typing import Optional, Tuple, Union, List, Dict, Any
 
+
+def _transformers_returns_2tuple() -> bool:
+    """
+    transformers >= 4.48 refactored LlamaAttention.forward to return a 2-tuple
+    (attn_output, attn_weights); the decoder layer updates the KV cache in place.
+    transformers < 4.48 expects the attention module to return a 3-tuple
+    (attn_output, attn_weights, present_key_value). We must match the installed
+    version or the decoder layer's tuple-unpacking raises a ValueError.
+    """
+    try:
+        import transformers
+        parts = transformers.__version__.split(".")
+        major, minor = int(parts[0]), int(parts[1])
+        return (major, minor) >= (4, 48)
+    except Exception:
+        # Newest transformers is the safe default for unknown/dev versions.
+        return True
+
+
+_RETURN_2TUPLE = _transformers_returns_2tuple()
+
 try:
     from transformers.models.llama.modeling_llama import (
         LlamaAttention,
@@ -382,8 +403,12 @@ class LlamaAttentionAdapter(AttentionOperatorAdapter):
         if not output_attentions:
             attn_weights = None
 
-        # LLaMA, Mistral, and Qwen2 decoder layers always expect a 2-tuple: (attn_output, attn_weights)
-        return attn_output, attn_weights
+        # LLaMA/Mistral/Qwen2 decoder layers expect a 2-tuple (attn_output,
+        # attn_weights) on transformers >= 4.48, and a 3-tuple that also carries
+        # present_key_value on older versions. Match the installed version.
+        if _RETURN_2TUPLE:
+            return attn_output, attn_weights
+        return attn_output, attn_weights, past_key_value
 
 
 
