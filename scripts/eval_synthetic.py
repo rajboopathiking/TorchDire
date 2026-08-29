@@ -70,17 +70,39 @@ from scripts.finetune_qgfd import (  # noqa: E402
 # Candidate induction vocabulary. Filtered at runtime down to the words that are
 # a SINGLE token under the model's own tokenizer (see single_token_vocab), which
 # keeps "one word = one hop" true for any BPE vocabulary.
+#
+# The concrete-noun block alone was not enough. Llama's SentencePiece vocabulary
+# keeps only 36 of those as single tokens after the "Sequence:" prefix, below the
+# induction_seq_len + 4 = 52 the default probe needs, so TinyLlama-1.1B raised
+# rather than reporting a number. The high-frequency block below is the fix:
+# common short words survive nearly every BPE/SP merge table, taking the
+# TinyLlama count to 199 and SmolLM2 / Qwen2.5 / GPT-2 past 250. Do not prune it
+# back to "nicer" words — the probe needs headroom on the least generous
+# tokenizer, not aesthetics.
 _CANDIDATE_WORDS = """
 apple river stone tiger cloud bridge candle forest marble silver garden window
 mountain harbor lantern copper velvet meadow anchor pepper thunder ribbon saddle
 tunnel violin walnut orchid pyramid compass diamond emerald falcon glacier hammer
-island jungle kettle ladder magnet needle island oyster palace quilt rocket
+island jungle kettle ladder magnet needle oyster palace quilt rocket
 shadow temple umbrella valley whistle yellow zebra basket cactus dolphin engine
 feather guitar helmet igloo jacket kitten lemon monkey noodle orange pencil
 quiver rabbit summer turtle union violet wagon xylophone yogurt zipper autumn
-bottle circus desert eagle flower grape hotel indigo juice koala lemon mirror
-nectar ocean piano queen rocket sunset trumpet velvet winter cabin dragon
+bottle circus desert eagle flower grape hotel indigo juice koala mirror
+nectar ocean piano queen sunset trumpet winter cabin dragon
 fabric ginger honey ivory jelly kernel lilac mango nickel olive parrot quartz
+time year people way day man thing woman life child world school state family
+student group country problem hand part place case week company system program
+question work government number night point home water room mother area money
+story month lot right study book eyes job word business issue side kind head
+house service friend father power hour game line end member law car city name
+team minute idea kid body information back parent face others level office door
+health person art war history party result change morning reason research girl
+guy moment air teacher force education foot boy age policy process music market
+sense nation plan college interest death course someone experience road song
+list need field role action feeling class period effort rule fire south
+north east west spring table light green blue black white red
+brown small large young early late long short high low free full open true
+close hard easy strong human local social major better best sure real
 """.split()
 
 

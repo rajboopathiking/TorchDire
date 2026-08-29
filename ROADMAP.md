@@ -367,7 +367,8 @@ Licensed under the MIT License.
   2. IEEE Journal Manuscript Draft: IEEE_QGFD_Paper_Draft.md                                                                          
       • Publication-ready draft paper formatted for IEEE submission.                                                                  
       • Formal mathematical proofs for all 5 theorems.                                                                                
-      • Experimental ablation results table (ROUGE-L, BLEU, BERTScore F1).                                                            
+      • Experimental protocol (arms, paired statistics, threats to validity). The ablation table that once sat here was       
+      fabricated and has been removed; empirical sections await a real run. See docs/interpreting-results.md.                 
   3. Production PyTorch Library Package (torchdire):                                                                                  
       • torchdire/nn/qgfd.py: Core MultiHeadQGFDLayer (Matrix P, local CausalConv1D mode, α warmup schedule, P detachment, numerical  
       stability).                                                                                                                     

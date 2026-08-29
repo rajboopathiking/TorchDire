@@ -26,12 +26,12 @@ from scripts.review_experiments import (  # noqa: E402
 )
 
 
-def _fake_run(seed, sm_ppls, qg_ppls, rates=(0.0, 0.05, 0.10)):
+def _fake_run(seed, sm_ppls, qg_ppls, rates=(0.0, 0.05, 0.10), n_params=None):
     """One run_all()-shaped dict. sm_ppls/qg_ppls are per-rate perplexities."""
     cfg = ExperimentConfig(model_id="fake/model", seed=seed)
 
     def arm(kind, ppls):
-        return {
+        d = {
             "kind": kind,
             "clean_ppl": ppls[0],
             "robustness": {float(r): p for r, p in zip(rates, ppls)},
@@ -40,6 +40,9 @@ def _fake_run(seed, sm_ppls, qg_ppls, rates=(0.0, 0.05, 0.10)):
             "latency": {"prefill_ms": 100.0 + seed, "tokens_per_s": 5000.0},
             "generation": [],
         }
+        if n_params is not None:
+            d["n_params"] = n_params
+        return d
 
     return {
         "config": {**cfg.__dict__},
@@ -164,3 +167,20 @@ def test_aggregate_is_json_serializable():
     agg = aggregate_runs(runs, seeds=[0, 1, 2])
     blob = json.dumps(agg)          # must not raise
     assert "robustness_gap_pct" in blob
+
+
+def test_meta_carries_the_parameter_count_for_scale_ordering():
+    """
+    Table 1a in the report orders models by size, and inferring size from the
+    checkpoint name is exactly the kind of hard-coding that silently mis-sorts a
+    renamed model, so the count is measured and carried through.
+    """
+    runs = [_fake_run(s, [10.0, 12.0, 14.0], [10.0, 11.9, 13.8], n_params=135_000_000)
+            for s in (0, 1, 2)]
+    agg = aggregate_runs(runs, seeds=[0, 1, 2])
+    assert agg["meta"]["n_params"] == 135_000_000
+
+
+def test_meta_n_params_is_none_for_aggregates_written_before_it_existed():
+    runs = [_fake_run(s, [10.0, 12.0, 14.0], [10.0, 11.9, 13.8]) for s in (0, 1, 2)]
+    assert aggregate_runs(runs, seeds=[0, 1, 2])["meta"]["n_params"] is None

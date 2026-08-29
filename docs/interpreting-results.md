@@ -131,28 +131,47 @@ divides by `int(valid.sum())`. `noise_rate = 1.0` raises rather than return a nu
 
 ## Numbers that are *not* used for any reported result
 
-`torchdire/experiments/ablation.py` contains a `QGFDAblator` that reports ROUGE /
-BLEU / BERTScore, and `torchdire/profiler/efficiency.py` contains a `QGFDProfiler`
-that reports FLOPs and VRAM. **Neither set of numbers comes from a model.**
+`torchdire/experiments/ablation.py` (`QGFDAblator`) and `torchdire/profiler/efficiency.py`
+(`QGFDProfiler`) both emit metric-shaped numbers. **Neither belongs in the paper.**
 
-The ablator's scores are literal arithmetic on constants:
+`QGFDAblator` *used to* fabricate its scores outright. It called
+`trainer.evaluate(dataloader)`, discarded the result, and returned literal arithmetic:
 
 ```python
+# REMOVED — do not reintroduce
 base_rouge = 0.6800 + (0.015 if steps == 2 else 0.005) \
                     + (0.010 if alpha == 0.02 else 0.0) \
                     + (0.005 if detach_p else 0.0)
 ```
 
-The profiler's `baseline_gflops`, `qgfd_gflops` and `estimated_vram_mb` are closed-form
-formulas in `seq_len`/`num_heads`/`d_k`, not measurements. (Its latency figure *is*
-timed, but the harness measures latency itself and the report uses that.)
+It now reports what it measured, under `proxy_*` keys. The gap between the two is the
+point of this section. Fabricated, the table read `0.6821 → 0.6953` with a tidy monotone
+response to $T$, $\alpha$ and `detach_P`. Measured, on the task the ablator actually runs
+— a randomly-initialised 128-dim model, 100 synthetic samples, one epoch — proxy ROUGE-L
+is **0.0219**, and it is *bit-identical* for $T=2$ and $T=4$, because `warmup_steps=2000`
+against roughly seven optimizer steps pins $\alpha$ near zero and diffusion never
+activates. The fabricated version showed a clean effect where the code produces none.
+
+So the ablator's real output is still not a result: the proxies are not reference ROUGE-L
+or BLEU, the model is untrained, and the configuration knobs do not yet bite. Treat it as
+a plumbing smoke test.
+
+A `bert_score_f1` key was also removed rather than renamed. It was
+`0.5 * (rouge + bleu) + 0.40` — an affine function of its two neighbours, carrying no
+independent information, with a floor that made every model report a "BERTScore" above
+0.40. Real BERTScore needs a BERT encoder and reference text; that class has neither.
+
+`QGFDProfiler`'s `baseline_gflops`, `qgfd_gflops` and `estimated_vram_mb` are closed-form
+formulas in `seq_len`/`num_heads`/`d_k`, not measurements. (Its latency figure *is* timed,
+but the harness measures latency itself and the report uses that.)
 
 None of these feed `paper/REPORT.md`, and none may be quoted.
 
-This matters because an earlier draft (`IEEE_QGFD_Paper_Draft.md`) reported a
-single-seed ROUGE improvement of 0.6953 vs 0.6821 from that source. Those two numbers
-are `0.6800 + 0.015 + …` and `0.6800 + 0.005 + …` — the "improvement" is a constant
-someone typed. It must not be carried into the paper.
+This matters because earlier revisions of `IEEE_QGFD_Paper_Draft.md` and
+`EXPERIMENTATION_DOCS.md` both carried the fabricated table — the latter as a
+ready-to-paste LaTeX block labelled "use this directly in your manuscript". The claimed
+improvement of 0.6953 over 0.6821 is the difference between `0.6800 + 0.015 + …` and
+`0.6800 + 0.005 + …`: a constant someone typed. Both tables have been removed.
 
 For real memory and latency numbers use `overhead.json` from the notebook's sweep,
 which calls `torch.cuda.max_memory_allocated()` and times actual forward passes.

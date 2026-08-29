@@ -248,9 +248,21 @@ Execute directly on Google Colab GPU:
 ## 8. IEEE Publication & Benchmark Guidelines
 
 When preparing paper experiments for IEEE journals:
-1. **Base Models:** SmolLM2-135M or Qwen2.5-0.5B.
-2. **Settings:** Diffusion steps $T=2, \alpha=0.02, \text{detach\_P}=\text{True}, \text{warmup}=2000$.
-3. **Metrics:** ROUGE-L, BLEU, BERTScore F1, Perplexity, Latency (ms), and VRAM (MB).
+1. **Base Models:** SmolLM2-135M, Qwen2.5-0.5B or TinyLlama-1.1B (Llama/Qwen2/Mistral are
+   the only architectures with genuine adapters — `verify_patch()` enforces it).
+2. **Settings:** $T \in \{1,2\}$, $\alpha \in \{0.02, 0.05\}$, `detach_P=True`,
+   and `is_causal=True` — mandatory for teacher-forced evaluation, since an unmasked $P$
+   diffuses probability mass onto future keys and deflates perplexity.
+3. **Metrics:** clean perplexity, perplexity degradation under input noise (the headline,
+   reported as a **paired** within-seed gap with a t-based 95% CI), attention entropy and
+   sink mass as relative deltas, prefill latency and peak VRAM, and induction/passkey
+   exact-match accuracy. Every figure comes from `scripts/` via `paper/REPORT.md`.
+4. **Not metrics:** `QGFDAblator`'s proxy ROUGE-L/BLEU and `QGFDProfiler`'s analytic
+   GFLOPs/VRAM estimates. The ablator runs a randomly-initialised toy model on synthetic
+   data and its proxies are not the reference implementations; the profiler's FLOP and VRAM
+   figures are closed-form formulas rather than measurements (its latency figure *is*
+   timed, but the harness times latency itself). Neither may be quoted. See
+   [docs/interpreting-results.md](docs/interpreting-results.md).
 
 ---
 

@@ -180,27 +180,54 @@ run_ablation_study('colab_ablation_results.csv')
 
 ## 9. IEEE Publication LaTeX Table Templates
 
-Use this formatted LaTeX table directly in your IEEE conference or journal paper manuscript:
+> **A fabricated table was removed from this section.** It presented six rows of
+> ROUGE-L / BLEU / BERTScore F1 (`0.6821 … 0.6953`, bolded winners) under the heading
+> "use this formatted LaTeX table directly in your manuscript". Those numbers were never
+> measured. They came from `QGFDAblator`, which at the time computed
+> `trainer.evaluate(...)`, threw the result away, and emitted
+> `0.6800 + (0.015 if steps == 2 else 0.005) + …` — arithmetic on literals that responds
+> to the ablation grid without touching a model. The `BERTScore F1` column was
+> `0.5·(rouge + bleu) + 0.40`, an affine function of its two neighbours, so it could not
+> disagree with them and could never fall below 0.40.
+>
+> `QGFDAblator` now reports what it measures. On its actual task — a randomly-initialised
+> 128-dim model, 100 synthetic samples, one epoch — the measured proxy ROUGE-L is
+> **0.0219**, and it is *identical* for $T=2$ and $T=4$ because `warmup_steps=2000`
+> against ~7 optimizer steps holds $\alpha \approx 0$ and diffusion never switches on.
+> The fabricated table showed a clean monotone effect where the code produces no effect
+> at all. Do not restore it, and do not paste ablator output into a paper either: it is a
+> plumbing smoke test, not an experiment.
+
+The tables that belong in a manuscript come from `paper/REPORT.md`, which
+`scripts/build_report.py` fills from the aggregated JSON. The headline is the **paired**
+robustness gap $\Delta\%_{\text{softmax}} - \Delta\%_{\text{QGFD}}$ with a t-based 95%
+interval, so the template has to carry $n$ and the interval, not a bare mean:
 
 ```latex
 \begin{table}[h]
-\caption{Ablation Study of QGFD Attention Hyperparameters on Text Generation Quality}
-\label{tab:qgfd_ablation}
+\caption{Perplexity degradation under character-level input noise. Positive gap
+         means QGFD degrades less. Paired within-seed differences, $n$ seeds,
+         two-sided $t$-based 95\% CI. Baseline is eager materialised softmax.}
+\label{tab:qgfd_robustness}
 \centering
-\begin{tabular}{ccccccc}
+\begin{tabular}{lcccc}
 \hline
-\textbf{Steps ($T$)} & \boldsymbol{$\alpha$} & \textbf{Detach $P$} & \textbf{Warmup} & \textbf{ROUGE-L} & \textbf{BLEU} & \textbf{BERTScore F1} \\
+\textbf{Model} & \textbf{Noise} & \textbf{$\Delta\%$ softmax} & \textbf{$\Delta\%$ QGFD}
+               & \textbf{Gap (pp)} \\
 \hline
-0 (Baseline) & 0.00 & N/A & N/A & 0.6821 & 0.5031 & 0.9206 \\
-2 & 0.02 & False & 2000 & 0.6905 & 0.5168 & 0.9220 \\
-2 & 0.02 & True & 2000 & \textbf{0.6953} & \textbf{0.5222} & 0.9229 \\
-2 & 0.05 & True & 2000 & 0.6926 & 0.5184 & \textbf{0.9236} \\
-4 & 0.02 & True & 2000 & 0.6952 & 0.5191 & \textbf{0.9243} \\
-4 & 0.05 & True & 5000 & 0.6926 & 0.5151 & 0.9225 \\
+% One row per (model, noise rate). Transcribe from paper/REPORT.md.
+% Render each cell as  mean $\pm$ ci95 , and mark the gap column:
+%   $^{*}$ when |mean| > ci95 > 0,  \textsc{ns} when the CI includes zero,
+%   n/a when n < 2.  Never leave a cell blank for a track that did not run.
 \hline
 \end{tabular}
 \end{table}
 ```
+
+Fill it only from a run you executed, and state $n$, the device and the executed dtype
+(free-tier T4/P100 run fp16, not bf16) in the caption or a footnote. A gap whose interval
+includes zero is a null result and is reported as one — see
+[docs/interpreting-results.md](docs/interpreting-results.md).
 
 ---
 

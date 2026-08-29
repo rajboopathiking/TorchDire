@@ -75,7 +75,21 @@ class QGFDTrainer:
         return math.sqrt(p1 * p2)
 
     def evaluate(self, dataloader: DataLoader) -> dict[str, float]:
-        """Evaluates model performance and computes ROUGE-L, BLEU, BERTScore F1, and Loss."""
+        """Evaluates the model and returns cross-entropy loss plus two token-overlap proxies.
+
+        Returns `{"loss", "rouge_l", "bleu"}`. The two overlap scores are computed from
+        argmax token IDs by `compute_rouge_l_proxy` / `compute_bleu_proxy` — they are not
+        the reference ROUGE-L / BLEU implementations and are not comparable to published
+        figures. Use them to compare two arms trained under identical conditions here,
+        nothing more.
+
+        A `bert_score_f1` key used to be returned as well, computed as
+        `0.5 * (rouge + bleu) + 0.40`. That is an affine function of the other two
+        metrics — it carried no independent information, and the `+0.40` floor made every
+        model report a "BERTScore" above 0.40. It has been removed rather than renamed.
+        Computing real BERTScore requires a BERT encoder and reference text; this class
+        has neither.
+        """
         self.model.eval()
         total_loss = 0.0
         total_rouge = 0.0
@@ -111,14 +125,11 @@ class QGFDTrainer:
         avg_loss = total_loss / max(1, total_samples)
         avg_rouge = total_rouge / max(1, total_samples)
         avg_bleu = total_bleu / max(1, total_samples)
-        # BERTScore F1 proxy estimate from ROUGE and BLEU harmony
-        bert_score_f1 = 0.5 * (avg_rouge + avg_bleu) + 0.40
 
         return {
             "loss": round(avg_loss, 4),
             "rouge_l": round(avg_rouge, 4),
             "bleu": round(avg_bleu, 4),
-            "bert_score_f1": round(min(0.999, bert_score_f1), 4),
         }
 
     def train_epoch(self, dataloader: DataLoader) -> float:

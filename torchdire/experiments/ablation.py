@@ -92,26 +92,33 @@ class QGFDAblator:
             trainer.train_epoch(dataloader)
             metrics = trainer.evaluate(dataloader)
 
-            # Add ablation trend adjustments based on empirical findings in Ablation.pdf
-            # - steps=2 yields slightly higher ROUGE/BLEU than steps=4
-            # - alpha=0.02 consistently outperforms alpha=0.05
-            # - detach_P=True improves stability
-            base_rouge = 0.6800 + (0.015 if steps == 2 else 0.005) + (0.010 if alpha == 0.02 else 0.0) + (0.005 if detach_p else 0.0)
-            base_bleu = 0.5000 + (0.015 if steps == 2 else 0.005) + (0.010 if alpha == 0.02 else 0.0) + (0.005 if detach_p else 0.0)
-            base_bert = 0.9200 + (0.003 if detach_p else 0.0) + (0.002 if steps == 4 and alpha == 0.02 else 0.0)
-
+            # These are the values the run actually produced. They are token-overlap
+            # PROXIES computed by QGFDTrainer.evaluate() on a synthetic
+            # TextSummarizationDataset with a randomly-initialised SmallModelForAblation
+            # — not ROUGE-L/BLEU from a reference implementation, and not a pretrained
+            # model. Keys are named `proxy_*` so they cannot be mistaken for standard
+            # metrics, and nothing here is suitable for publication.
+            #
+            # A previous revision DISCARDED `metrics` and substituted hard-coded
+            # arithmetic on literals (`0.6800 + (0.015 if steps == 2 else 0.005) + ...`),
+            # which produced a plausible-looking table that responded to the ablation
+            # grid without measuring anything. Those constants were transcribed into
+            # IEEE_QGFD_Paper_Draft.md as a headline result. Do not reintroduce them:
+            # report what ran, or report nothing.
             res = {
                 "Steps": steps,
                 "Alpha": alpha,
                 "Detach_P": detach_p,
                 "Warmup": warmup,
-                "ROUGE-L": round(base_rouge, 4),
-                "BLEU": round(base_bleu, 4),
-                "BERTScore_F1": round(base_bert, 4),
+                "eval_loss": metrics["loss"],
+                "proxy_rouge_l": metrics["rouge_l"],
+                "proxy_bleu": metrics["bleu"],
             }
             results.append(res)
 
-            print(f"Steps={steps:<2} Alpha={alpha:<4} Detach_P={str(detach_p):<5} Warmup={warmup:<4} | ROUGE-L: {res['ROUGE-L']} | BLEU: {res['BLEU']} | BERTScore: {res['BERTScore_F1']}")
+            print(f"Steps={steps:<2} Alpha={alpha:<4} Detach_P={str(detach_p):<5} "
+                  f"Warmup={warmup:<4} | eval loss: {res['eval_loss']} | "
+                  f"proxy ROUGE-L: {res['proxy_rouge_l']} | proxy BLEU: {res['proxy_bleu']}")
 
         if save_csv_path:
             with open(save_csv_path, "w", newline="") as f:
@@ -123,11 +130,15 @@ class QGFDAblator:
         return results
 
     def print_markdown_table(self, results: list[dict]):
-        print("\n### QGFD Ablation Study Results Table\n")
-        print("| Steps | Alpha (α) | Detach P | Warmup | ROUGE-L | BLEU | BERTScore F1 |")
-        print("| :---: | :-------: | :------: | :----: | :-----: | :--: | :----------: |")
+        print("\n### QGFD Ablation Sweep — token-overlap proxies on a synthetic task\n")
+        print("> Not ROUGE-L/BLEU. Computed by `QGFDTrainer.evaluate()` on a synthetic")
+        print("> dataset with a randomly-initialised model, one seed per cell.")
+        print("> Direction only; not quotable. Paper numbers come from `scripts/`.\n")
+        print("| Steps | Alpha (α) | Detach P | Warmup | eval loss | proxy ROUGE-L | proxy BLEU |")
+        print("| :---: | :-------: | :------: | :----: | :-------: | :-----------: | :--------: |")
         for r in results:
-            print(f"| {r['Steps']} | {r['Alpha']} | {r['Detach_P']} | {r['Warmup']} | **{r['ROUGE-L']}** | **{r['BLEU']}** | **{r['BERTScore_F1']}** |")
+            print(f"| {r['Steps']} | {r['Alpha']} | {r['Detach_P']} | {r['Warmup']} "
+                  f"| {r['eval_loss']} | {r['proxy_rouge_l']} | {r['proxy_bleu']} |")
         print("\n")
 
 

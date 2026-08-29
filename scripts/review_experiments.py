@@ -439,6 +439,9 @@ def _run_arm(kind: str, cfg: ExperimentConfig, texts: List[str]) -> Dict:
     set_seed(cfg.seed)
     tok, model, device = make_model(kind, cfg)
     arm = {"kind": kind}
+    # Recorded so the report can plot the robustness gap against model scale
+    # without hard-coding a parameter count per checkpoint name.
+    arm["n_params"] = sum(p.numel() for p in model.parameters())
     print(f"  [{kind}] perplexity ...", flush=True)
     arm["clean_ppl"] = compute_perplexity(
         model, tok, texts[:cfg.ppl_num_texts], device,
@@ -660,6 +663,7 @@ def aggregate_runs(runs: Sequence[Dict], seeds: Optional[Sequence[int]] = None) 
             "diffusion_steps": runs[0]["config"]["diffusion_steps"],
             "target_alpha": runs[0]["config"]["target_alpha"],
             "noise_rates": [_rate_key(r) for r in rates],
+            "n_params": runs[0]["arms"]["softmax"].get("n_params"),
             "ci_method": "two-sided t, 95%",
             "baseline_note": ("baseline is eager materialised softmax "
                               "(SoftmaxOperator), NOT SDPA/FlashAttention — "

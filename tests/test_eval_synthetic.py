@@ -66,6 +66,23 @@ def test_single_token_vocab_words_really_cost_one_token(tok):
         assert tok(text, add_special_tokens=False)["input_ids"] == base_ids + [tid]
 
 
+def test_candidate_vocab_has_headroom_for_the_default_probe(tok):
+    """
+    Regression guard. The default probe needs induction_seq_len + 4 = 52 words
+    that are single tokens under the MODEL's tokenizer, and the original
+    concrete-noun list left Llama's SentencePiece vocabulary with only 36 —
+    TinyLlama-1.1B raised mid-run rather than reporting a number. GPT-2 is the
+    stand-in here (no large download); the margin below is what makes the list
+    survive a less generous merge table.
+    """
+    need = SyntheticConfig.induction_seq_len + 4
+    _, ids = single_token_vocab(tok)
+    assert len(ids) >= 2 * need, (
+        f"only {len(ids)} single-token words for gpt2, want >= {2 * need} of "
+        f"headroom so a stingier tokenizer still clears {need}"
+    )
+
+
 def test_induction_sequence_is_a_doubled_random_sequence(tok, cfg):
     ids, tgt, valid, pos, ctrl = make_induction_examples(tok, cfg, random.Random(0))
     k = cfg.induction_seq_len
