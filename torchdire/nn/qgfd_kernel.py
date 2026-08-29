@@ -139,7 +139,7 @@ class QGFDKernel(nn.Module):
     def _eps(x: torch.Tensor) -> float:
         return 1e-3 if x.dtype in (torch.float16, torch.bfloat16) else 1e-6
 
-    def build_transition_from_keys(self, K: torch.Tensor, target_heads: Optional[int] = None, is_causal: Optional[bool] = None) -> torch.Tensor:
+    def build_transition_from_keys(self, K: torch.Tensor, target_heads: Optional[int] = None, is_causal: Optional[bool] = None, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
         Build key-based row-stochastic transition matrix P from key projections.
         Args:
@@ -148,11 +148,16 @@ class QGFDKernel(nn.Module):
             is_causal: If True, applies lower-triangular causal masking to P.
                        Defaults to self.is_causal (False) so key transitions remain unmasked across
                        already-cached past keys, preventing probability sinks at position 0.
+            dtype: Compute/return dtype for P. Defaults to K.dtype. Callers pass
+                   p0's dtype so `p @ P` never sees mismatched operands (matmul
+                   does not type-promote).
         Returns:
-            P: (B, H, Lk, Lk) transition matrix
+            P: (B, H, Lk, Lk) transition matrix in `dtype`
         """
         if is_causal is None:
             is_causal = getattr(self, "is_causal", False)
+        if dtype is not None and K.dtype != dtype:
+            K = K.to(dtype)
         B, H_k, Lk, head_dim = K.shape
 
         K_norm = F.normalize(K, p=2, dim=-1, eps=self._eps(K))
@@ -354,6 +359,8 @@ class QGFDKernel(nn.Module):
         p0 = F.softmax(scores, dim=-1)
 
         alpha_eff = self.get_alpha()
+        if isinstance(alpha_eff, torch.Tensor) and alpha_eff.dtype != p0.dtype:
+            alpha_eff = alpha_eff.to(p0.dtype)
         alpha_nonzero = (alpha_eff != 0.0).any().item() if isinstance(alpha_eff, torch.Tensor) else abs(alpha_eff) > 0.0
         # `alpha` derives from step_count, which is only changed by the trainer
         # via set_step() OUTSIDE the forward — so forward and checkpoint
@@ -375,7 +382,7 @@ class QGFDKernel(nn.Module):
             if mode is None:
                 p = p0
             elif mode == "full":
-                P = self.build_transition_from_keys(key_states, target_heads=H, is_causal=self.is_causal)
+                P = self.build_transition_from_keys(key_states, target_heads=H, is_causal=self.is_causal, dtype=p0.dtype)
                 if self.diffusion_steps == 1 and valid_mask is None and self.early_stop_eps <= 0.0:
                     # Optimized single-step path: avoids loop overhead and intermediate allocations
                     p = (1.0 - alpha_eff) * p0 + alpha_eff * torch.matmul(p0, P)

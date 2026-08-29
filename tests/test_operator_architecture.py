@@ -425,6 +425,76 @@ def test_is_leaf_attention():
     print("✓ _is_leaf_attention test passed")
 
 
+def test_qgfd_operator_low_precision_inputs():
+    """QGFDOperator must accept bf16/fp16 scores+keys (matmul does not type-promote).
+
+    Regression: p0 is upcast to float32 while `key_states` stays in the model
+    dtype, so `p @ P` raised "expected scalar type Float but found BFloat16".
+    """
+    torch.manual_seed(0)
+
+    B, H, Lq, Lk = 2, 4, 6, 6
+    for dtype in (torch.bfloat16, torch.float16):
+        scores = torch.randn(B, H, Lq, Lk).to(dtype)
+        key_states = torch.randn(B, H, Lk, 32).to(dtype)
+
+        # multi-step + early stop + a padding mask exercises the loop path;
+        # diffusion_steps=1 with no mask exercises the fused single-step path.
+        for steps, mask, eps in ((1, None, 0.0), (3, None, 1e-5), (2, None, 0.0)):
+            for learnable in (False, True):
+                op = QGFDOperator(
+                    diffusion_steps=steps,
+                    target_alpha=0.05,
+                    early_stop_eps=eps,
+                    mode="full",
+                    is_causal=True,
+                    learnable_alpha=learnable,
+                    num_heads=H if learnable else None,
+                )
+                op.eval()
+                if learnable:
+                    op.to(dtype)
+
+                probs = op(scores, key_states, attention_mask=mask)
+
+                assert probs.dtype == dtype, f"expected {dtype}, got {probs.dtype}"
+                assert torch.isfinite(probs.float()).all()
+                sums = probs.float().sum(dim=-1)
+                assert torch.allclose(sums, torch.ones_like(sums), atol=2e-2), sums
+
+    # Also cover a masked run (valid_mask path) in bf16.
+    scores = torch.randn(B, H, Lq, Lk).to(torch.bfloat16)
+    key_states = torch.randn(B, H, Lk, 32).to(torch.bfloat16)
+    attn_mask = torch.zeros(B, 1, 1, Lk, dtype=torch.bfloat16)
+    attn_mask[:, :, :, -2:] = -1e9
+    op = QGFDOperator(diffusion_steps=2, target_alpha=0.05, mode="full", is_causal=True)
+    op.eval()
+    probs = op(scores, key_states, attention_mask=attn_mask)
+    assert probs.dtype == torch.bfloat16
+    assert torch.isfinite(probs.float()).all()
+
+    print("✓ QGFDOperator low-precision (bf16/fp16) test passed")
+
+
+def test_qgfd_kernel_low_precision_inputs():
+    """QGFDKernel shares the p @ P codepath and must also accept bf16 inputs."""
+    from torchdire.nn.qgfd_kernel import QGFDKernel
+
+    torch.manual_seed(0)
+    B, H, Lq, Lk = 1, 2, 5, 5
+    scores = torch.randn(B, H, Lq, Lk).to(torch.bfloat16)
+    key_states = torch.randn(B, H, Lk, 16).to(torch.bfloat16)
+
+    kernel = QGFDKernel(diffusion_steps=2, target_alpha=0.05, mode="full")
+    kernel.eval()
+    probs = kernel(scores, key_states)
+
+    assert probs.dtype == torch.bfloat16
+    assert torch.isfinite(probs.float()).all()
+
+    print("✓ QGFDKernel low-precision (bf16) test passed")
+
+
 if __name__ == "__main__":
     print("Running operator-based QGFD tests...\n")
     
@@ -434,6 +504,8 @@ if __name__ == "__main__":
     test_qgfd_operator_alpha_zero_equals_softmax()
     test_qgfd_operator_gradient_flow()
     test_qgfd_operator_detach_P()
+    test_qgfd_operator_low_precision_inputs()
+    test_qgfd_kernel_low_precision_inputs()
     test_operator_replacer_on_dummy_model()
     test_llama_attention_adapter()
     

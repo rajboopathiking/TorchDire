@@ -182,19 +182,26 @@ class QGFDOperator(AttentionProbabilityOperator):
         K: torch.Tensor,
         target_heads: Optional[int] = None,
         is_causal: Optional[bool] = None,
+        dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
         """
         Build key-based row-stochastic transition matrix P from key projections.
-        
+
         Args:
             K: (B, H_k, Lk, head_dim)
             target_heads: Number of query heads H (repeats K heads if GQA/MQA)
             is_causal: If True, applies lower-triangular causal masking to P.
+            dtype: Compute/return dtype for P. Defaults to K.dtype. The caller
+                passes the dtype of p0 so that `p @ P` never sees mismatched
+                operands (matmul does not type-promote): under a bf16/fp16 model
+                `key_states` is low precision while p0 is float32.
         Returns:
-            P: (B, H, Lk, Lk) transition matrix
+            P: (B, H, Lk, Lk) transition matrix in `dtype`
         """
         if is_causal is None:
             is_causal = getattr(self, "is_causal", False)
+        if dtype is not None and K.dtype != dtype:
+            K = K.to(dtype)
         B, H_k, Lk, head_dim = K.shape
 
         K_norm = F.normalize(K, p=2, dim=-1, eps=self._eps(K))
@@ -337,6 +344,10 @@ class QGFDOperator(AttentionProbabilityOperator):
         p0 = F.softmax(scores.to(torch.float32), dim=-1)
 
         alpha_eff = self.get_alpha()
+        if isinstance(alpha_eff, torch.Tensor) and alpha_eff.dtype != p0.dtype:
+            # learnable_alpha follows the model dtype (bf16/fp16); the diffusion
+            # itself runs in p0's dtype (float32).
+            alpha_eff = alpha_eff.to(p0.dtype)
         alpha_nonzero = (
             (alpha_eff != 0.0).any().item()
             if isinstance(alpha_eff, torch.Tensor)
@@ -361,7 +372,9 @@ class QGFDOperator(AttentionProbabilityOperator):
             elif mode == "full":
                 if key_states is None:
                     raise ValueError("QGFDOperator in 'full' mode requires key_states")
-                P = self.build_transition_from_keys(key_states, target_heads=H, is_causal=self.is_causal)
+                P = self.build_transition_from_keys(
+                    key_states, target_heads=H, is_causal=self.is_causal, dtype=p0.dtype
+                )
 
                 if self.diffusion_steps == 1 and valid_mask is None and self.early_stop_eps <= 0.0:
                     p = (1.0 - alpha_eff) * p0 + alpha_eff * torch.matmul(p0, P)
