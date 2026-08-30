@@ -16,6 +16,7 @@ bit-for-bit softmax, so it is a drop-in.
 | --- | --- |
 | Run the paper experiments and get `paper/REPORT.md` | [paper-experiments.md](paper-experiments.md) |
 | Understand what a number in the report actually licenses | [interpreting-results.md](interpreting-results.md) |
+| See why fixed-α failed, and the staged plan for the learned gate | [gated-qgfd-experiments.md](gated-qgfd-experiments.md) |
 | Consume the result JSON from my own code | [results-schema.md](results-schema.md) |
 | Know how QGFD is wired into a model, and why LoRA once died | [architecture.md](architecture.md) |
 | Look up a config parameter's range | [../QGFD_CONFIG_REFERENCE.md](../QGFD_CONFIG_REFERENCE.md) |
@@ -29,6 +30,7 @@ bit-for-bit softmax, so it is a drop-in.
 | 2 · LoRA A/B | `scripts/finetune_qgfd.py` | Does letting the model adapt to the diffused distribution help? |
 | 3 · Synthetic | `scripts/eval_synthetic.py` | Does QGFD improve two-hop routing (induction) and retrieval (passkey)? |
 | 4 · Ablation | `QGFD_Paper_Experiments.ipynb` | Which `(T, α, detach_P)` direction is worth pursuing? |
+| 5 · Gated | `scripts/gated_experiments.py` · `QGFD_Gated_Experiments.ipynb` | Fixed α lost. Is there headroom for a *learned, zero-init, per-head* gate — and does the key graph matter, or is it adaptive temperature? |
 
 `scripts/build_report.py` ingests whatever the tracks produced and writes
 `paper/REPORT.md`. Tracks you skipped render as `_Not yet run._`, never as blanks.
